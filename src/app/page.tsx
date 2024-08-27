@@ -32,7 +32,8 @@ export default function Home() {
   };
 
   return (
-    <div className="flex flex-col min-h-screen bg-gradient-to-b from-primary-50 to-white dark:from-gray-900 dark:to-gray-800">
+    //TODO: there is an overflow in x direction due to the 3 icon animations
+    <div className="flex flex-col min-w-screen min-h-screen bg-gradient-to-b from-primary-50 to-white dark:from-gray-900 dark:to-gray-800 overflow-x-hidden">
       <header className="px-4 lg:px-6 h-14 flex items-center border-b">
         <Link className="flex items-center justify-center" href="/">
           <Video className="h-6 w-6 text-primary-600" />
