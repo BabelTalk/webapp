@@ -3,7 +3,7 @@
 clone the repository in your local folder
 
 ```bash
-git clone https://github.com/NexTalkRTC/webapp.git
+git clone https://github.com/BabelTalk/webapp.git
 ```
 
 install the dependencies
