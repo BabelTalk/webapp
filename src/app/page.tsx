@@ -17,15 +17,23 @@ import {
   Puzzle,
   Rocket,
   Languages,
+  Menu,
+  X,
 } from "lucide-react";
 import Link from "next/link";
-import { motion, useScroll, useTransform } from "framer-motion";
+import {
+  motion,
+  useScroll,
+  useTransform,
+  AnimatePresence,
+} from "framer-motion";
+import { useState } from "react";
 
 export default function Home() {
   const { scrollYProgress } = useScroll();
   const opacity = useTransform(scrollYProgress, [0, 0.5], [1, 0]);
   const scale = useTransform(scrollYProgress, [0, 0.5], [1, 0.8]);
-
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const fadeInUp = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
@@ -41,6 +49,15 @@ export default function Home() {
 
   const scaleOnHover = {
     hover: { scale: 1.05, transition: { duration: 0.2 } },
+  };
+
+  const menuVariants = {
+    closed: { opacity: 0, x: "-100%" },
+    open: {
+      opacity: 1,
+      x: 0,
+      transition: { type: "spring", stiffness: 100, damping: 20 },
+    },
   };
 
   return (
@@ -61,7 +78,7 @@ export default function Home() {
             BabelTalk
           </motion.span>
         </Link>
-        <nav className="ml-auto flex gap-4 sm:gap-6">
+        <nav className="ml-auto hidden md:flex gap-4 sm:gap-6">
           {["Features", "How It Works", "Benefits"].map((item) => (
             <motion.div key={item} whileHover="hover" variants={scaleOnHover}>
               <Link
@@ -73,7 +90,44 @@ export default function Home() {
             </motion.div>
           ))}
         </nav>
+        <motion.button
+          className="ml-auto md:hidden"
+          onClick={() => setIsMenuOpen(!isMenuOpen)}
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+        >
+          {isMenuOpen ? <X /> : <Menu />}
+        </motion.button>
       </motion.header>
+
+      <AnimatePresence>
+        {isMenuOpen && (
+          <motion.nav
+            className="fixed inset-0 bg-white dark:bg-gray-900 z-40 flex flex-col items-center justify-center"
+            initial="closed"
+            animate="open"
+            exit="closed"
+            variants={menuVariants}
+          >
+            {["Features", "How It Works", "Benefits"].map((item) => (
+              <motion.div
+                key={item}
+                whileHover="hover"
+                variants={scaleOnHover}
+                className="my-4"
+              >
+                <Link
+                  className="text-2xl font-medium hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+                  href={`#${item.toLowerCase().replace(/\s+/g, "-")}`}
+                  onClick={() => setIsMenuOpen(false)}
+                >
+                  {item}
+                </Link>
+              </motion.div>
+            ))}
+          </motion.nav>
+        )}
+      </AnimatePresence>
       <main className="flex-1">
         <section className="w-full py-12 md:py-24 lg:py-32 xl:py-48 bg-primary-100 dark:bg-gray-800 relative overflow-hidden">
           <motion.div
