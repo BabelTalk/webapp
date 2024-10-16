@@ -39,13 +39,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 export default function Home() {
   const { scrollYProgress } = useScroll();
   const opacity = useTransform(scrollYProgress, [0, 0.5], [1, 0]);
   const scale = useTransform(scrollYProgress, [0, 0.5], [1, 0.8]);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const { user, error, isLoading } = useUser();
+  const [meetingCode, setMeetingCode] = useState("");
+  const { user, isLoading } = useUser();
+  const router = useRouter();
   const fadeInUp = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
@@ -70,6 +74,36 @@ export default function Home() {
       x: 0,
       transition: { type: "spring", stiffness: 100, damping: 20 },
     },
+  };
+
+  const createMeeting = () => {
+    if (!user) {
+      toast.error("Authentication required", {
+        description: "Please log in to create a meeting.",
+      });
+      return;
+    }
+
+    const roomID = Math.random().toString(36).substring(2, 7);
+    router.push(`/meeting/${roomID}`);
+  };
+
+  const joinMeeting = () => {
+    if (!user) {
+      toast.error("Authentication required", {
+        description: "Please log in to join a meeting.",
+      });
+      return;
+    }
+
+    if (meetingCode.trim() === "") {
+      toast.error("Invalid meeting code", {
+        description: "Please enter a valid meeting code.",
+      });
+      return;
+    }
+
+    router.push(`/pre-join/${meetingCode}`);
   };
 
   return (
@@ -107,7 +141,7 @@ export default function Home() {
         ) : user ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Avatar className="w-8 h-8 cursor-pointer mx-2">
+              <Avatar className="w-8 h-8 cursor-pointer ml-4">
                 <AvatarImage src={user.picture || ""} alt={user.name || ""} />
                 <AvatarFallback>{user.name?.charAt(0) || "U"}</AvatarFallback>
               </Avatar>
@@ -205,6 +239,8 @@ export default function Home() {
               >
                 <motion.div whileHover="hover" variants={scaleOnHover}>
                   <Button
+                    onClick={createMeeting}
+                    disabled={isLoading}
                     size="lg"
                     className="w-full bg-primary-600 hover:bg-primary-700 text-white dark:bg-primary-500 dark:hover:bg-primary-600"
                   >
@@ -212,11 +248,18 @@ export default function Home() {
                   </Button>
                 </motion.div>
                 <div className="flex space-x-2">
-                  <Input className="flex-1" placeholder="Enter meeting code" />
+                  <Input
+                    className="flex-1"
+                    placeholder="Enter meeting code"
+                    value={meetingCode}
+                    onChange={(e) => setMeetingCode(e.target.value)}
+                  />
                   <motion.div whileHover="hover" variants={scaleOnHover}>
                     <Button
                       type="submit"
                       className="bg-orange-500 hover:bg-orange-600 text-white dark:bg-orange-600 dark:hover:bg-orange-700"
+                      onClick={joinMeeting}
+                      disabled={isLoading}
                     >
                       Join
                     </Button>
