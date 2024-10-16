@@ -17,8 +17,8 @@ export default function NotFound() {
         className=""
         initial={false}
         animate={{
-          backgroundColor: isOn ? "#c9ffed" : "#ff2558",
-          color: isOn ? "#7fffd4" : "#c70f46",
+          backgroundColor: "#ff2558",
+          color: "#c70f46",
         }}
       >
         <div className="w-screen flex-col justify-center items-center flex h-screen">
