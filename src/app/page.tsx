@@ -19,6 +19,7 @@ import {
   Languages,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -27,13 +28,24 @@ import {
   useTransform,
   AnimatePresence,
 } from "framer-motion";
+import { useUser } from "@auth0/nextjs-auth0/client";
 import { useState } from "react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
 export default function Home() {
   const { scrollYProgress } = useScroll();
   const opacity = useTransform(scrollYProgress, [0, 0.5], [1, 0]);
   const scale = useTransform(scrollYProgress, [0, 0.5], [1, 0.8]);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const { user, error, isLoading } = useUser();
   const fadeInUp = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
@@ -90,6 +102,37 @@ export default function Home() {
             </motion.div>
           ))}
         </nav>
+        {isLoading ? (
+          <div className="w-8 h-8 rounded-full bg-gray-200 animate-pulse mx-2"></div>
+        ) : user ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Avatar className="w-8 h-8 cursor-pointer mx-2">
+                <AvatarImage src={user.picture || ""} alt={user.name || ""} />
+                <AvatarFallback>{user.name?.charAt(0) || "U"}</AvatarFallback>
+              </Avatar>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>{user.name}</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem>
+                <Link href="/dashboard">Dashboard</Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem>
+                <Link href="/api/auth/logout">
+                  <div className="flex items-center">
+                    <LogOut className="mr-2 h-4 w-4" />
+                    <span>Log out</span>
+                  </div>
+                </Link>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <Button asChild className="mx-2">
+            <Link href="/api/auth/login">Log in</Link>
+          </Button>
+        )}
         <motion.button
           className="ml-auto md:hidden"
           onClick={() => setIsMenuOpen(!isMenuOpen)}
