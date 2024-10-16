@@ -1,18 +1,18 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import { ThemeProvider } from "next-themes";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "NexTalk",
+  title: "BabelTalk",
   description:
     "An AI-assisted real-time communication platform with for small to medium-sized teams to increase your productivity.",
 };
 
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import Providers from "@/lib/Provider";
 export default function RootLayout({
   children,
 }: {
@@ -26,9 +26,7 @@ export default function RootLayout({
           `bg-lightbg text-black dark:bg-darkbg dark:text-white`
         )}
       >
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          {children}
-        </ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
