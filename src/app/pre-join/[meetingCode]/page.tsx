@@ -69,7 +69,7 @@ const PreJoin = ({ params }: { params: { meetingCode: string } }) => {
         }
       };
     }
-  }, [user, stream]);
+  }, [user]);
 
   const toggleMic = () => {
     if (stream) {
