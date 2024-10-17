@@ -5,8 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "@auth0/nextjs-auth0/client";
 import io, { Socket } from "socket.io-client";
 import Peer from "simple-peer";
+import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Mic,
   MicOff,
@@ -22,7 +24,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+
+interface PeerData {
+  peer: Peer.Instance;
+  userName: string;
+}
 
 export default function Meeting({
   params,
@@ -32,7 +38,7 @@ export default function Meeting({
   const { user, isLoading } = useUser();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [peers, setPeers] = useState<Peer.Instance[]>([]);
+  const [peers, setPeers] = useState<PeerData[]>([]);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isMicOn, setIsMicOn] = useState(true);
   const [isCameraOn, setIsCameraOn] = useState(true);
@@ -41,7 +47,9 @@ export default function Meeting({
   const [mediaError, setMediaError] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const userVideoRef = useRef<HTMLVideoElement>(null);
-  const peersRef = useRef<{ peerID: string; peer: Peer.Instance }[]>([]);
+  const peersRef = useRef<
+    { peerID: string; peer: Peer.Instance; userName: string }[]
+  >([]);
 
   useEffect(() => {
     if (!user && !isLoading) {
@@ -53,7 +61,6 @@ export default function Meeting({
     if (user) {
       const getMediaDevices = async () => {
         try {
-          // Check for permissions
           const permissions = await navigator.permissions.query({
             name: "camera" as PermissionName,
           });
@@ -75,32 +82,47 @@ export default function Meeting({
             addTrailingSlash: false,
           });
 
-          socketRef.current.emit("join room", params.meetingCode);
-
-          socketRef.current.on("all users", (users: string[]) => {
-            const peers: Peer.Instance[] = [];
-            users.forEach((userID) => {
-              if (socketRef.current && socketRef.current.id) {
-                const peer = createPeer(userID, socketRef.current.id, stream);
-                peersRef.current.push({
-                  peerID: userID,
-                  peer,
-                });
-                peers.push(peer);
-              }
-            });
-            setPeers(peers);
+          socketRef.current.emit("join room", {
+            roomID: params.meetingCode,
+            userName: user.name || "Anonymous",
           });
 
           socketRef.current.on(
+            "all users",
+            (users: { id: string; userName: string }[]) => {
+              const peers: PeerData[] = [];
+              users.forEach(({ id: userID, userName }) => {
+                if (socketRef.current && socketRef.current.id) {
+                  const peer = createPeer(userID, socketRef.current.id, stream);
+                  peersRef.current.push({
+                    peerID: userID,
+                    peer,
+                    userName,
+                  });
+                  peers.push({ peer, userName });
+                }
+              });
+              setPeers(peers);
+            }
+          );
+
+          socketRef.current.on(
             "user joined",
-            (payload: { signal: Peer.SignalData; callerID: string }) => {
+            (payload: {
+              signal: Peer.SignalData;
+              callerID: string;
+              userName: string;
+            }) => {
               const peer = addPeer(payload.signal, payload.callerID, stream);
               peersRef.current.push({
                 peerID: payload.callerID,
                 peer,
+                userName: payload.userName,
               });
-              setPeers((peers) => [...peers, peer]);
+              setPeers((peers) => [
+                ...peers,
+                { peer, userName: payload.userName },
+              ]);
             }
           );
 
@@ -121,7 +143,7 @@ export default function Meeting({
             }
             const peers = peersRef.current.filter((p) => p.peerID !== id);
             peersRef.current = peers;
-            setPeers(peers.map((p) => p.peer));
+            setPeers(peers.map(({ peer, userName }) => ({ peer, userName })));
           });
         } catch (err) {
           console.error("Error accessing media devices:", err);
@@ -166,11 +188,8 @@ export default function Meeting({
         userToSignal,
         callerID,
         signal,
+        userName: user?.name || "Anonymous",
       });
-    });
-
-    peer.on("stream", (stream) => {
-      console.log("Received stream from peer:", userToSignal);
     });
 
     return peer;
@@ -189,10 +208,6 @@ export default function Meeting({
 
     peer.on("signal", (signal) => {
       socketRef.current?.emit("returning signal", { signal, callerID });
-    });
-
-    peer.on("stream", (stream) => {
-      console.log("Received stream from peer:", callerID);
     });
 
     peer.signal(incomingSignal);
@@ -236,26 +251,68 @@ export default function Meeting({
   if (!user) {
     return null;
   }
-  console.log("Peers: ", peers);
+
+  const getVideoLayout = () => {
+    const totalParticipants = peers.length + 1;
+    if (totalParticipants === 1) {
+      return "w-full h-full";
+    } else if (totalParticipants === 2) {
+      return "w-full md:w-1/2 h-full";
+    } else if (totalParticipants <= 4) {
+      return "w-full md:w-1/2 lg:w-1/2 h-1/2";
+    } else {
+      return "w-full md:w-1/3 lg:w-1/3 h-1/3";
+    }
+  };
 
   return (
     <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900">
-      <div className="flex-1 p-4 overflow-y-auto">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <Card className="aspect-video bg-black">
-            <video
-              ref={userVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
-          </Card>
-          {peers.map((peer, index) => (
-            <Card key={index} className="aspect-video bg-black">
-              <Video peer={peer} />
-            </Card>
-          ))}
+      <div className="flex-1 p-4 overflow-hidden">
+        <div className="relative w-full h-full">
+          <AnimatePresence>
+            <motion.div
+              key="user-video"
+              className={`absolute ${getVideoLayout()}`}
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Card className="w-full h-full overflow-hidden rounded-lg relative">
+                <video
+                  ref={userVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
+                  {user.name || "You"}
+                </div>
+              </Card>
+            </motion.div>
+            {peers.map(({ peer, userName }, index) => (
+              <motion.div
+                key={index}
+                className={`absolute ${getVideoLayout()}`}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ duration: 0.3 }}
+                style={{
+                  top: `${Math.floor((index + 1) / 3) * 33.33}%`,
+                  left: `${((index + 1) % 3) * 33.33}%`,
+                }}
+              >
+                <Card className="w-full h-full overflow-hidden rounded-lg relative">
+                  <Video peer={peer} />
+                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
+                    {userName}
+                  </div>
+                </Card>
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
       </div>
       <div className="p-4 bg-white dark:bg-gray-800 shadow-lg">
@@ -277,9 +334,14 @@ export default function Meeting({
         </div>
       </div>
       {showCopyToast && (
-        <div className="fixed bottom-4 right-4 bg-green-500 text-white p-2 rounded">
+        <motion.div
+          className="fixed bottom-4 right-4 bg-green-500 text-white p-2 rounded"
+          initial={{ opacity: 0, y: 50 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 50 }}
+        >
           Meeting link copied to clipboard!
-        </div>
+        </motion.div>
       )}
       <Dialog open={showNewMeetingModal} onOpenChange={setShowNewMeetingModal}>
         <DialogContent>
@@ -302,9 +364,14 @@ export default function Meeting({
         </DialogContent>
       </Dialog>
       {mediaError && (
-        <div className="fixed bottom-4 left-4 bg-red-500 text-white p-2 rounded">
+        <motion.div
+          className="fixed bottom-4 left-4 bg-red-500 text-white p-2 rounded"
+          initial={{ opacity: 0, y: 50 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 50 }}
+        >
           {mediaError}
-        </div>
+        </motion.div>
       )}
     </div>
   );
