@@ -1,7 +1,13 @@
 import { Server as HTTPServer } from "http";
-import { NextApiRequest, NextApiResponse } from "next";
+import { NextApiRequest } from "next";
 import { Server as ServerIO } from "socket.io";
 import { NextApiResponseServerIO } from "@/types/next";
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
 // Users in different rooms
 const users: { [key: string]: string[] } = {};
@@ -30,7 +36,9 @@ const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
 
     // Initialize a new Socket.IO server
     const io = new ServerIO(httpServer, {
-      path: "pages/api/socket",
+      path: "/api/socket/io",
+      addTrailingSlash: false,
+      transports: ["websocket", "polling"],
     });
 
     io.on("connection", (socket) => {

@@ -71,7 +71,8 @@ export default function Meeting({
             userVideoRef.current.srcObject = stream;
           }
           socketRef.current = io("", {
-            path: "pages/api/socket",
+            path: "/api/socket/io",
+            addTrailingSlash: false,
           });
 
           socketRef.current.emit("join room", params.meetingCode);
@@ -168,6 +169,10 @@ export default function Meeting({
       });
     });
 
+    peer.on("stream", (stream) => {
+      console.log("Received stream from peer:", userToSignal);
+    });
+
     return peer;
   }
 
@@ -184,6 +189,10 @@ export default function Meeting({
 
     peer.on("signal", (signal) => {
       socketRef.current?.emit("returning signal", { signal, callerID });
+    });
+
+    peer.on("stream", (stream) => {
+      console.log("Received stream from peer:", callerID);
     });
 
     peer.signal(incomingSignal);
@@ -227,6 +236,7 @@ export default function Meeting({
   if (!user) {
     return null;
   }
+  console.log("Peers: ", peers);
 
   return (
     <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900">
