@@ -71,7 +71,7 @@ export default function Meeting({
             userVideoRef.current.srcObject = stream;
           }
           socketRef.current = io("", {
-            path: "/api/socket",
+            path: "pages/api/socket",
           });
 
           socketRef.current.emit("join room", params.meetingCode);
@@ -141,10 +141,10 @@ export default function Meeting({
         }
       };
     }
-  }, [user, params.meetingCode, stream]);
+  }, [user, params.meetingCode]);
 
   useEffect(() => {
-    if (searchParams.get("new") === "true") {
+    if (searchParams && searchParams.get("new") === "true") {
       setShowNewMeetingModal(true);
     }
   }, [searchParams]);
