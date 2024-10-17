@@ -9,8 +9,13 @@ export const config = {
   },
 };
 
+interface User {
+  id: string;
+  userName: string;
+}
+
 // Users in different rooms
-const users: { [key: string]: string[] } = {};
+const rooms: { [key: string]: User[] } = {};
 
 const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
   console.log("ioHandler called");
@@ -44,25 +49,25 @@ const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
     io.on("connection", (socket) => {
       console.log("New socket connection established");
 
-      // Handle joining a room
-      socket.on("join room", (roomID: string) => {
-        console.log(`Socket ${socket.id} joining room ${roomID}`);
-
-        if (users[roomID]) {
-          users[roomID].push(socket.id);
-        } else {
-          users[roomID] = [socket.id];
+      socket.on(
+        "join room",
+        ({ roomID, userName }: { roomID: string; userName: string }) => {
+          if (rooms[roomID]) {
+            rooms[roomID].push({ id: socket.id, userName });
+          } else {
+            rooms[roomID] = [{ id: socket.id, userName }];
+          }
+          const usersInThisRoom = rooms[roomID].filter(
+            (user) => user.id !== socket.id
+          );
+          socket.emit("all users", usersInThisRoom);
+          socket.to(roomID).emit("user joined", {
+            signal: null,
+            callerID: socket.id,
+            userName,
+          });
         }
-
-        const usersInThisRoom = users[roomID].filter((id) => id !== socket.id);
-        socket.emit("all users", usersInThisRoom);
-
-        // Notify other users in the room
-        socket.to(roomID).emit("user joined", {
-          signal: null,
-          callerID: socket.id,
-        });
-      });
+      );
 
       // Handle sending a signal
       socket.on("sending signal", (payload) => {
@@ -75,31 +80,27 @@ const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
         });
       });
 
-      // Handle returning a signal
-      socket.on("returning signal", (payload) => {
-        console.log(
-          `Socket ${socket.id} returning signal to ${payload.callerID}`
-        );
-        io.to(payload.callerID).emit("receiving returned signal", {
-          signal: payload.signal,
-          id: socket.id,
-        });
-      });
+      socket.on(
+        "returning signal",
+        (payload: { callerID: string; signal: any }) => {
+          io.to(payload.callerID).emit("receiving returned signal", {
+            signal: payload.signal,
+            id: socket.id,
+          });
+        }
+      );
 
-      // Handle disconnecting
       socket.on("disconnect", () => {
-        console.log(`Socket ${socket.id} disconnected`);
-        Object.keys(users).forEach((roomID) => {
-          users[roomID] = users[roomID].filter((id) => id !== socket.id);
-          if (users[roomID].length === 0) {
-            delete users[roomID];
+        Object.keys(rooms).forEach((roomID) => {
+          rooms[roomID] = rooms[roomID].filter((user) => user.id !== socket.id);
+          if (rooms[roomID].length === 0) {
+            delete rooms[roomID];
           } else {
             socket.to(roomID).emit("user left", socket.id);
           }
         });
       });
     });
-
     // Attach the Socket.IO instance to the server to prevent re-initialization
     res.socket.server.io = io;
   } else {
