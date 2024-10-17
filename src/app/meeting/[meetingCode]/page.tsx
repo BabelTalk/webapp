@@ -143,7 +143,12 @@ export default function Meeting({
             }
             const peers = peersRef.current.filter((p) => p.peerID !== id);
             peersRef.current = peers;
-            setPeers(peers.map(({ peer, userName }) => ({ peer, userName })));
+            setPeers(
+              peers.map(({ peer, userName }) => ({
+                peer,
+                userName,
+              }))
+            );
           });
         } catch (err) {
           console.error("Error accessing media devices:", err);
@@ -257,11 +262,11 @@ export default function Meeting({
     if (totalParticipants === 1) {
       return "w-full h-full";
     } else if (totalParticipants === 2) {
-      return "w-full md:w-1/2 h-full";
+      return "w-full h-full";
     } else if (totalParticipants <= 4) {
-      return "w-full md:w-1/2 lg:w-1/2 h-1/2";
+      return "w-1/2 h-1/2";
     } else {
-      return "w-full md:w-1/3 lg:w-1/3 h-1/3";
+      return "w-1/3 h-1/3";
     }
   };
 
@@ -270,15 +275,40 @@ export default function Meeting({
       <div className="flex-1 p-4 overflow-hidden">
         <div className="relative w-full h-full">
           <AnimatePresence>
+            {peers.length === 1 && (
+              <motion.div
+                key="peer-video"
+                className="absolute inset-0"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ duration: 0.3 }}
+              >
+                <Card
+                  className={`w-full h-full overflow-hidden rounded-lg relative`}
+                >
+                  <Video peer={peers[0].peer} />
+                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
+                    {peers[0].userName}
+                  </div>
+                </Card>
+              </motion.div>
+            )}
             <motion.div
               key="user-video"
-              className={`absolute ${getVideoLayout()}`}
+              className={`absolute ${
+                peers.length === 1
+                  ? "bottom-4 right-4 w-1/4 h-1/4"
+                  : getVideoLayout()
+              }`}
               initial={{ opacity: 0, scale: 0.8 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
               transition={{ duration: 0.3 }}
             >
-              <Card className="w-full h-full overflow-hidden rounded-lg relative">
+              <Card
+                className={`w-full h-full overflow-hidden rounded-lg relative `}
+              >
                 <video
                   ref={userVideoRef}
                   autoPlay
@@ -291,27 +321,30 @@ export default function Meeting({
                 </div>
               </Card>
             </motion.div>
-            {peers.map(({ peer, userName }, index) => (
-              <motion.div
-                key={index}
-                className={`absolute ${getVideoLayout()}`}
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                transition={{ duration: 0.3 }}
-                style={{
-                  top: `${Math.floor((index + 1) / 3) * 33.33}%`,
-                  left: `${((index + 1) % 3) * 33.33}%`,
-                }}
-              >
-                <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                  <Video peer={peer} />
-                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
-                    {userName}
-                  </div>
-                </Card>
-              </motion.div>
-            ))}
+            {peers.length > 1 &&
+              peers.map(({ peer, userName }, index) => (
+                <motion.div
+                  key={index}
+                  className={`absolute ${getVideoLayout()}`}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ duration: 0.3 }}
+                  style={{
+                    top: `${Math.floor(index / 3) * 33.33}%`,
+                    left: `${(index % 3) * 33.33}%`,
+                  }}
+                >
+                  <Card
+                    className={`w-full h-full overflow-hidden rounded-lg relative `}
+                  >
+                    <Video peer={peer} />
+                    <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
+                      {userName}
+                    </div>
+                  </Card>
+                </motion.div>
+              ))}
           </AnimatePresence>
         </div>
       </div>
