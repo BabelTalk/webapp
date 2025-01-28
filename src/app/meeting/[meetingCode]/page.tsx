@@ -77,10 +77,12 @@ export default function Meeting({
           if (userVideoRef.current) {
             userVideoRef.current.srcObject = stream;
           }
-          socketRef.current = io("", {
-            path: "/api/socket/io",
-            addTrailingSlash: false,
-          });
+          socketRef.current = io(
+            process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "",
+            {
+              transports: ["websocket", "polling"],
+            }
+          );
 
           socketRef.current.emit("join room", {
             roomID: params.meetingCode,
