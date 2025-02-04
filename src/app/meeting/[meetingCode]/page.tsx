@@ -23,6 +23,7 @@ import {
   MoreVertical,
   Minimize2,
   MonitorUp,
+  RotateCw,
 } from "lucide-react";
 import {
   Dialog,
@@ -139,6 +140,9 @@ export default function Meeting({
     []
   );
 
+  // Add mobile detection
+  const [isMobile, setIsMobile] = useState(false);
+
   const socketRef = useRef<Socket | null>(null);
   const userVideoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -152,6 +156,20 @@ export default function Meeting({
     }
   }, [user, isLoading, router]);
 
+  // Detect mobile device
+  useEffect(() => {
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isMobileDevice =
+        /mobile|android|iphone|ipad|ipod|windows phone/i.test(userAgent);
+      setIsMobile(isMobileDevice);
+    };
+
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
   useEffect(() => {
     if (user) {
       const getMediaDevices = async () => {
@@ -164,10 +182,9 @@ export default function Meeting({
             return;
           }
 
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true,
-          });
+          const stream = await navigator.mediaDevices.getUserMedia(
+            getMediaConstraints()
+          );
           setStream(stream);
           if (userVideoRef.current) {
             userVideoRef.current.srcObject = stream;
@@ -282,14 +299,18 @@ export default function Meeting({
           );
         } catch (err) {
           console.error("Error accessing media devices:", err);
-          setMediaError("Error accessing media devices.");
+          setMediaError(
+            "Error accessing media devices. Please ensure camera and microphone permissions are granted."
+          );
         }
       };
 
       if (navigator.mediaDevices) {
         getMediaDevices();
       } else {
-        setMediaError("Media devices are not supported on this device.");
+        setMediaError(
+          "Media devices are not supported on this device. Please try using a different browser or device."
+        );
       }
 
       return () => {
@@ -631,6 +652,71 @@ export default function Meeting({
     }
   }, []);
 
+  // Update media constraints for mobile
+  const getMediaConstraints = () => {
+    const constraints: MediaStreamConstraints = {
+      audio: {
+        echoCancellation: settings.audio.echoCancellation,
+        noiseSuppression: settings.audio.noiseSuppression,
+      },
+      video: {
+        facingMode: "user", // Default to front camera
+        width: isMobile
+          ? { ideal: 640, max: 1280 }
+          : { ideal: 1280, max: 1920 },
+        height: isMobile ? { ideal: 480, max: 720 } : { ideal: 720, max: 1080 },
+        frameRate: { max: settings.video.frameRate },
+      },
+    };
+    return constraints;
+  };
+
+  // Add camera switch function for mobile
+  const [isBackCamera, setIsBackCamera] = useState(false);
+  const switchCamera = async () => {
+    if (!stream) return;
+
+    try {
+      // Stop all video tracks
+      stream.getVideoTracks().forEach((track) => track.stop());
+
+      // Get new stream with different camera
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        ...getMediaConstraints(),
+        video: {
+          ...(getMediaConstraints().video as MediaTrackConstraints),
+          facingMode: isBackCamera ? "user" : "environment",
+        },
+      });
+
+      // Replace video track in all peer connections
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      peersRef.current.forEach(({ peer }) => {
+        const videoSender = (peer as any)._pc
+          .getSenders()
+          .find((sender: RTCRtpSender) => sender.track?.kind === "video");
+        if (videoSender) {
+          videoSender.replaceTrack(newVideoTrack);
+        }
+      });
+
+      // Update local stream and video
+      const audioTrack = stream.getAudioTracks()[0];
+      setStream(new MediaStream([newVideoTrack, audioTrack]));
+      if (userVideoRef.current) {
+        userVideoRef.current.srcObject = new MediaStream([
+          newVideoTrack,
+          audioTrack,
+        ]);
+      }
+
+      setIsBackCamera(!isBackCamera);
+    } catch (error) {
+      console.error("Error switching camera:", error);
+      setMediaError("Failed to switch camera. Please try again.");
+    }
+  };
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -665,7 +751,7 @@ export default function Meeting({
         className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900"
         ref={containerRef}
       >
-        <div className="flex-1 p-4 overflow-hidden">
+        <div className="flex-1 p-2 sm:p-4 overflow-hidden">
           <div className="relative w-full h-full">
             <AnimatePresence>
               <motion.div
@@ -768,9 +854,9 @@ export default function Meeting({
             </AnimatePresence>
           </div>
         </div>
-        <div className="p-4 bg-white dark:bg-gray-800 shadow-lg">
-          <div className="flex justify-between items-center max-w-4xl mx-auto">
-            <div className="flex space-x-2">
+        <div className="p-2 sm:p-4 bg-white dark:bg-gray-800 shadow-lg">
+          <div className="flex flex-wrap justify-center sm:justify-between items-center gap-2 max-w-4xl mx-auto">
+            <div className="flex flex-wrap justify-center gap-2">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" size="icon" onClick={toggleMic}>
@@ -799,34 +885,59 @@ export default function Meeting({
                 </TooltipContent>
               </Tooltip>
 
+              {isMobile && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={switchCamera}
+                    >
+                      <RotateCw className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Switch Camera</TooltipContent>
+                </Tooltip>
+              )}
+
+              {!isMobile && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={toggleScreenShare}
+                    >
+                      <ScreenShare
+                        className={`h-4 w-4 ${
+                          isScreenSharing ? "text-primary" : ""
+                        }`}
+                      />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {isScreenSharing ? "Stop Sharing" : "Share Screen"}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+
+            <Button
+              variant="destructive"
+              onClick={leaveMeeting}
+              className="order-last sm:order-none"
+            >
+              <PhoneOff className="mr-2 h-4 w-4" /> Leave
+            </Button>
+
+            <div className="flex flex-wrap justify-center gap-2">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="outline"
-                    size="icon"
-                    onClick={toggleScreenShare}
+                    onClick={copyMeetingLink}
+                    className="text-sm"
                   >
-                    <ScreenShare
-                      className={`h-4 w-4 ${
-                        isScreenSharing ? "text-primary" : ""
-                      }`}
-                    />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {isScreenSharing ? "Stop Sharing" : "Share Screen"}
-                </TooltipContent>
-              </Tooltip>
-            </div>
-
-            <Button variant="destructive" onClick={leaveMeeting}>
-              <PhoneOff className="mr-2 h-4 w-4" /> Leave Meeting
-            </Button>
-
-            <div className="flex space-x-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" onClick={copyMeetingLink}>
                     <Copy className="mr-2 h-4 w-4" /> Copy Link
                   </Button>
                 </TooltipTrigger>
@@ -849,9 +960,11 @@ export default function Meeting({
                   <DropdownMenuItem onClick={() => setShowSettingsModal(true)}>
                     <Settings className="mr-2 h-4 w-4" /> Settings
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={togglePictureInPicture}>
-                    <Minimize2 className="mr-2 h-4 w-4" /> Picture in Picture
-                  </DropdownMenuItem>
+                  {!isMobile && (
+                    <DropdownMenuItem onClick={togglePictureInPicture}>
+                      <Minimize2 className="mr-2 h-4 w-4" /> Picture in Picture
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onClick={toggleFullScreen}>
                     {isFullScreen ? (
                       <Minimize2 className="mr-2 h-4 w-4" />
@@ -890,7 +1003,7 @@ export default function Meeting({
         </div>
 
         <Dialog open={showSettingsModal} onOpenChange={setShowSettingsModal}>
-          <DialogContent className="sm:max-w-[425px]">
+          <DialogContent className="sm:max-w-[425px] w-[95vw] max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Settings</DialogTitle>
               <DialogDescription>
