@@ -21,14 +21,14 @@ const rooms = {};
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
-  socket.on("join room", ({ roomID, userName }) => {
+  socket.on("join room", ({ roomID, userName, isMuted, isCameraOff }) => {
     console.log(`User ${userName} joining room ${roomID}`);
 
     // Add user to room
     if (rooms[roomID]) {
-      rooms[roomID].push({ id: socket.id, userName });
+      rooms[roomID].push({ id: socket.id, userName, isMuted, isCameraOff });
     } else {
-      rooms[roomID] = [{ id: socket.id, userName }];
+      rooms[roomID] = [{ id: socket.id, userName, isMuted, isCameraOff }];
     }
 
     // Join socket room
@@ -47,6 +47,8 @@ io.on("connection", (socket) => {
       signal: null,
       callerID: socket.id,
       userName,
+      isMuted,
+      isCameraOff,
     });
   });
 
@@ -55,6 +57,9 @@ io.on("connection", (socket) => {
     io.to(payload.userToSignal).emit("user joined", {
       signal: payload.signal,
       callerID: payload.callerID,
+      userName: payload.userName,
+      isMuted: false,
+      isCameraOff: false,
     });
   });
 
@@ -62,6 +67,42 @@ io.on("connection", (socket) => {
     io.to(payload.callerID).emit("receiving returned signal", {
       signal: payload.signal,
       id: socket.id,
+    });
+  });
+
+  // Handle mute status changes
+  socket.on("mute_status", ({ isMuted }) => {
+    // Update user's mute status in all rooms they're in
+    Object.keys(rooms).forEach((roomID) => {
+      const userIndex = rooms[roomID].findIndex(
+        (user) => user.id === socket.id
+      );
+      if (userIndex !== -1) {
+        rooms[roomID][userIndex].isMuted = isMuted;
+        // Broadcast the change to all users in the room
+        socket.to(roomID).emit("peer_mute_status", {
+          peerId: socket.id,
+          isMuted,
+        });
+      }
+    });
+  });
+
+  // Handle camera status changes
+  socket.on("camera_status", ({ isCameraOff }) => {
+    // Update user's camera status in all rooms they're in
+    Object.keys(rooms).forEach((roomID) => {
+      const userIndex = rooms[roomID].findIndex(
+        (user) => user.id === socket.id
+      );
+      if (userIndex !== -1) {
+        rooms[roomID][userIndex].isCameraOff = isCameraOff;
+        // Broadcast the change to all users in the room
+        socket.to(roomID).emit("peer_camera_status", {
+          peerId: socket.id,
+          isCameraOff,
+        });
+      }
     });
   });
 
