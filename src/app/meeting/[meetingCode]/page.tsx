@@ -301,7 +301,7 @@ export default function Meeting({
             return;
           }
 
-          // Now get the media stream with the proper constraints
+          // Get the media stream with the proper constraints
           const mediaStream = await navigator.mediaDevices
             .getUserMedia(getMediaConstraints())
             .catch((error) => {
@@ -331,12 +331,14 @@ export default function Meeting({
 
           if (!mediaStream) return;
 
+          // Set the stream and update video element
           setStream(mediaStream);
           if (userVideoRef.current) {
             userVideoRef.current.srcObject = mediaStream;
+            await userVideoRef.current.play().catch(console.error);
           }
 
-          // Initialize socket connection after media is ready
+          // Initialize socket connection
           socketRef.current = io(
             process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "",
             {
@@ -344,6 +346,7 @@ export default function Meeting({
             }
           );
 
+          // Join the room
           socketRef.current.emit("join room", {
             roomID: params.meetingCode,
             userName: user.name || "Anonymous",
@@ -351,21 +354,22 @@ export default function Meeting({
             isCameraOff: !isCameraOn,
           });
 
-          // Update host status when receiving user list
+          // Socket event handlers
           socketRef.current.on("all users", (users: User[]) => {
-            const currentUser = users.find(
-              (u: User) => u.id === socketRef.current?.id
-            );
+            const socketId = socketRef.current?.id;
+            if (!socketId) {
+              console.error("Socket ID not available");
+              return;
+            }
+
+            const currentUser = users.find((u: User) => u.id === socketId);
             setIsHost(currentUser?.isHost || false);
+
             const peers: PeerData[] = [];
             users.forEach(
               ({ id: userID, userName, isMuted, isCameraOff }: User) => {
-                if (socketRef.current && socketRef.current.id) {
-                  const peer = createPeer(
-                    userID,
-                    socketRef.current.id,
-                    mediaStream
-                  );
+                if (userID !== socketId) {
+                  const peer = createPeer(userID, socketId, mediaStream);
                   peersRef.current.push({
                     peerID: userID,
                     peer,
@@ -451,7 +455,6 @@ export default function Meeting({
           });
         } catch (err) {
           console.error("Error in initializeMedia:", err);
-          // Error handling is now done in the getUserMedia catch block above
         }
       };
 
@@ -949,13 +952,7 @@ export default function Meeting({
                   transition={{ duration: 0.3 }}
                 >
                   <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                    {peers.length > 0 ? (
-                      peers[0].isCameraOff ? (
-                        <UserAvatar name={peers[0].userName} />
-                      ) : (
-                        <Video peer={peers[0].peer} />
-                      )
-                    ) : !isCameraOn ? (
+                    {!isCameraOn ? (
                       <UserAvatar name={user.name || "You"} />
                     ) : (
                       <video
@@ -963,65 +960,28 @@ export default function Meeting({
                         autoPlay
                         muted
                         playsInline
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover mirror"
                       />
                     )}
                     <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                      <span>
-                        {peers.length > 0
-                          ? peers[0].userName
-                          : user.name || "You"}{" "}
-                        {isScreenSharing && "(Screen)"}
-                      </span>
-                      {peers.length > 0
-                        ? peers[0].isMuted && <MicOff className="h-4 w-4" />
-                        : !isMicOn && <MicOff className="h-4 w-4" />}
+                      <span>{user.name || "You"}</span>
+                      {!isMicOn && <MicOff className="h-4 w-4" />}
                     </div>
                   </Card>
                 </motion.div>
 
-                {peers.length > 0 && (
-                  <motion.div
-                    key="self-video"
-                    className={`absolute ${getVideoLayout()}`}
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    transition={{ duration: 0.3 }}
-                  >
-                    <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                      {!isCameraOn ? (
-                        <UserAvatar name={user.name || "You"} />
-                      ) : (
-                        <video
-                          ref={userVideoRef}
-                          autoPlay
-                          muted
-                          playsInline
-                          className="w-full h-full object-cover"
-                        />
-                      )}
-                      <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                        <span>{user.name || "You"}</span>
-                        {!isMicOn && <MicOff className="h-4 w-4" />}
-                      </div>
-                    </Card>
-                  </motion.div>
-                )}
-
-                {peers
-                  .slice(1)
-                  .map(({ peer, userName, isMuted, isCameraOff }, index) => (
+                {peers.map(
+                  ({ peer, userName, isMuted, isCameraOff }, index) => (
                     <motion.div
-                      key={index + 1}
+                      key={index}
                       className={`absolute ${getVideoLayout()}`}
                       initial={{ opacity: 0, scale: 0.8 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.8 }}
                       transition={{ duration: 0.3 }}
                       style={{
-                        top: `${Math.floor((index + 1) / 3) * 33.33}%`,
-                        left: `${((index + 1) % 3) * 33.33}%`,
+                        top: `${Math.floor(index / 2) * 50}%`,
+                        left: `${(index % 2) * 50}%`,
                       }}
                     >
                       <Card className="w-full h-full overflow-hidden rounded-lg relative">
@@ -1036,7 +996,8 @@ export default function Meeting({
                         </div>
                       </Card>
                     </motion.div>
-                  ))}
+                  )
+                )}
               </AnimatePresence>
             </div>
           </div>
