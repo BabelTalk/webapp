@@ -43,13 +43,34 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { roomId, content, userName, replyToId, mentions } = body;
 
+    if (!roomId) {
+      return NextResponse.json(
+        { error: "Room ID is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!content) {
+      return NextResponse.json(
+        { error: "Message content is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!userName) {
+      return NextResponse.json(
+        { error: "User name is required" },
+        { status: 400 }
+      );
+    }
+
     const message = await prisma.message.create({
       data: {
         roomId,
         content,
         userName,
         replyToId,
-        mentions,
+        mentions: mentions || [],
       },
       include: {
         reactions: true,
