@@ -188,24 +188,31 @@ export default function Meeting({
   const [sidebarContent, setSidebarContent] = useState<SidebarContent>(null);
   const [isHost, setIsHost] = useState(false);
 
-  // Move getMediaConstraints before the useEffect hooks
+  // Add camera switch function for mobile
+  const [isBackCamera, setIsBackCamera] = useState(false);
+
+  // Update the getMediaConstraints function
   const getMediaConstraints = useCallback(() => {
     const constraints: MediaStreamConstraints = {
       audio: {
         echoCancellation: settings.audio.echoCancellation,
         noiseSuppression: settings.audio.noiseSuppression,
       },
-      video: {
-        facingMode: "user", // Default to front camera
-        width: isMobile
-          ? { ideal: 640, max: 1280 }
-          : { ideal: 1280, max: 1920 },
-        height: isMobile ? { ideal: 480, max: 720 } : { ideal: 720, max: 1080 },
-        frameRate: { max: settings.video.frameRate },
-      },
+      video: isMobile
+        ? {
+            facingMode: isBackCamera ? "environment" : "user",
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
+            frameRate: { max: 30 },
+          }
+        : {
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            frameRate: { max: settings.video.frameRate },
+          },
     };
     return constraints;
-  }, [isMobile, settings.audio, settings.video.frameRate]);
+  }, [isMobile, isBackCamera, settings.audio, settings.video.frameRate]);
 
   useEffect(() => {
     if (!user && !isLoading) {
@@ -227,61 +234,68 @@ export default function Meeting({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  // Update the permission check function
+  // Update the checkAndRequestPermissions function
   const checkAndRequestPermissions = async () => {
     try {
-      // For mobile browsers, we need to explicitly request permissions one by one
-      try {
-        // Try camera first
-        const videoStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-        });
-        videoStream.getTracks().forEach((track) => track.stop());
-        setCameraPermission("granted");
-      } catch (error) {
-        console.error("Camera permission error:", error);
-        if (error instanceof DOMException) {
-          if (error.name === "NotAllowedError") {
-            setCameraPermission("denied");
-            setMediaError(
-              "Camera access denied. Please grant camera permission and reload."
-            );
-          } else if (error.name === "NotFoundError") {
-            setCameraPermission("denied");
-            setMediaError(
-              "No camera found. Please check your device settings."
-            );
-          }
-        }
-        return false;
-      }
+      // For mobile browsers, we need to handle permissions differently
+      if (isMobile) {
+        // First check if permissions are already granted
+        const permissions = await Promise.all([
+          navigator.permissions.query({ name: "camera" as PermissionName }),
+          navigator.permissions.query({ name: "microphone" as PermissionName }),
+        ]);
 
-      // Then try microphone
-      try {
-        const audioStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        audioStream.getTracks().forEach((track) => track.stop());
-        setMicPermission("granted");
-      } catch (error) {
-        console.error("Microphone permission error:", error);
-        if (error instanceof DOMException) {
-          if (error.name === "NotAllowedError") {
-            setMicPermission("denied");
-            setMediaError(
-              "Microphone access denied. Please grant microphone permission and reload."
-            );
-          } else if (error.name === "NotFoundError") {
-            setMicPermission("denied");
-            setMediaError(
-              "No microphone found. Please check your device settings."
-            );
-          }
-        }
-        return false;
-      }
+        const [cameraPermission, micPermission] = permissions;
 
-      return true;
+        if (
+          cameraPermission.state === "denied" ||
+          micPermission.state === "denied"
+        ) {
+          setMediaError(
+            "Camera or microphone access denied. Please enable permissions in your browser settings and reload the page."
+          );
+          return false;
+        }
+
+        try {
+          // Request both permissions at once for mobile
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+
+          // Stop the test stream immediately
+          stream.getTracks().forEach((track) => track.stop());
+
+          setCameraPermission("granted");
+          setMicPermission("granted");
+          return true;
+        } catch (error) {
+          console.error("Mobile permission error:", error);
+          if (error instanceof DOMException) {
+            if (error.name === "NotAllowedError") {
+              setMediaError(
+                "Please grant camera and microphone permissions to join the meeting. If permissions are blocked, please enable them in your browser settings."
+              );
+            } else if (error.name === "NotFoundError") {
+              setMediaError(
+                "Could not find camera or microphone. Please check your device settings."
+              );
+            } else if (
+              error.name === "NotReadableError" ||
+              error.name === "AbortError"
+            ) {
+              setMediaError(
+                "Could not access your camera or microphone. Please make sure no other app is using them and try again."
+              );
+            }
+          }
+          return false;
+        }
+      } else {
+        // Desktop permission handling (existing code)
+        // ... existing code for desktop permissions ...
+      }
     } catch (error) {
       console.error("Error checking permissions:", error);
       setMediaError(
@@ -811,7 +825,6 @@ export default function Meeting({
   }, []);
 
   // Add camera switch function for mobile
-  const [isBackCamera, setIsBackCamera] = useState(false);
   const switchCamera = async () => {
     if (!stream) return;
 
@@ -856,33 +869,35 @@ export default function Meeting({
     }
   };
 
-  // Update the retry function to be more specific
+  // Update the retry function
   const retryMediaAccess = async () => {
     setMediaError(null);
     setCameraPermission(null);
     setMicPermission(null);
 
     if (user) {
-      // First try to get permissions
+      // For mobile, we need to reload the page after permissions are granted
+      if (isMobile) {
+        window.location.reload();
+        return;
+      }
+
+      // For desktop, try to reinitialize without reload
       const permissionsGranted = await checkAndRequestPermissions();
       if (permissionsGranted) {
-        // If on mobile, we need a full page reload
-        if (isMobile) {
-          window.location.reload();
-        } else {
-          // On desktop, we can try to reinitialize without reload
-          try {
-            const mediaStream = await navigator.mediaDevices.getUserMedia(
-              getMediaConstraints()
-            );
-            setStream(mediaStream);
-            if (userVideoRef.current) {
-              userVideoRef.current.srcObject = mediaStream;
-            }
-          } catch (error) {
-            console.error("Error retrying media access:", error);
-            setMediaError("Failed to access devices. Please reload the page.");
+        try {
+          const mediaStream = await navigator.mediaDevices.getUserMedia(
+            getMediaConstraints()
+          );
+          setStream(mediaStream);
+          if (userVideoRef.current) {
+            userVideoRef.current.srcObject = mediaStream;
           }
+        } catch (error) {
+          console.error("Error retrying media access:", error);
+          setMediaError(
+            "Failed to access devices. Please check your permissions and try again."
+          );
         }
       }
     }
@@ -1326,13 +1341,19 @@ export default function Meeting({
               <div className="flex flex-col gap-1">
                 <p className="font-semibold">Device Access Error:</p>
                 <p className="text-sm">{mediaError}</p>
-                {(cameraPermission === "denied" ||
-                  micPermission === "denied") && (
-                  <p className="text-sm mt-1">
-                    Tip: Look for the camera/microphone icon in your
-                    browser&apos;s address bar to manage permissions.
-                  </p>
-                )}
+                {isMobile &&
+                  (cameraPermission === "denied" ||
+                    micPermission === "denied") && (
+                    <div className="text-sm mt-2 space-y-2">
+                      <p>To fix this on mobile Chrome:</p>
+                      <ol className="list-decimal list-inside space-y-1">
+                        <li>Tap the lock icon (🔒) in the address bar</li>
+                        <li>Tap &ldquo;Site settings&rdquo;</li>
+                        <li>Enable both Camera and Microphone permissions</li>
+                        <li>Reload the page</li>
+                      </ol>
+                    </div>
+                  )}
               </div>
               <div className="flex gap-2">
                 <Button
@@ -1341,16 +1362,18 @@ export default function Meeting({
                   onClick={retryMediaAccess}
                   className="bg-white text-red-500 hover:bg-red-100"
                 >
-                  Retry Access
+                  {isMobile ? "Reload Page" : "Retry Access"}
                 </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => window.location.reload()}
-                  className="bg-white text-red-500 hover:bg-red-100"
-                >
-                  Reload Page
-                </Button>
+                {!isMobile && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => window.location.reload()}
+                    className="bg-white text-red-500 hover:bg-red-100"
+                  >
+                    Reload Page
+                  </Button>
+                )}
               </div>
             </div>
           </motion.div>
