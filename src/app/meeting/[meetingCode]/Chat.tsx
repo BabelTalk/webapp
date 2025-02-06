@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useTransition } from "react";
-import { io } from "socket.io-client";
+import { io, Socket } from "socket.io-client";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,12 +38,23 @@ interface Reaction {
 
 interface Message {
   id: string;
-  userName: string;
   content: string;
-  timestamp: Date;
-  replyTo?: Message;
+  userName: string;
+  timestamp: string;
   reactions: Reaction[];
   status?: "sending" | "sent" | "delivered";
+  replyTo?: Message;
+}
+
+interface MessageDeliveryPayload {
+  messageId: string;
+  userName: string;
+}
+
+interface MessageReactionPayload {
+  messageId: string;
+  reaction: Reaction;
+  previousReaction?: Reaction;
 }
 
 const EMOJI_OPTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
@@ -60,82 +71,98 @@ const Chat: React.FC<ChatProps> = ({
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [isPending, startTransition] = useTransition();
   const [isLoading, setIsLoading] = useState(true);
+  const [isOpen, setIsOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const socket = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "", {
-    transports: ["websocket", "polling"],
-  });
+  const socket = useRef<Socket | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // Load chat history when joining
   useEffect(() => {
-    const loadChatHistory = async () => {
-      setIsLoading(true);
+    if (!isOpen) return;
+
+    const fetchMessages = async () => {
       try {
-        const response = await fetch(`/api/messages?roomId=${roomID}`);
-        if (response.ok) {
-          const history = await response.json();
-          setMessages(history);
-          scrollToBottom();
-        }
+        const response = await fetch(`/api/messages/${roomID}`);
+        if (!response.ok) throw new Error("Failed to fetch messages");
+        const data = await response.json();
+        setMessages(data);
+        scrollToBottom();
       } catch (error) {
-        console.error("Error loading chat history:", error);
-      } finally {
-        setIsLoading(false);
+        console.error("Error fetching messages:", error);
       }
     };
 
-    loadChatHistory();
-  }, [roomID]);
+    fetchMessages();
+  }, [isOpen, roomID]);
 
   useEffect(() => {
-    socket.on("receive message", (message: Message) => {
+    socket.current = io(process.env.NEXT_PUBLIC_SOCKET_URL || "", {
+      query: { roomID },
+    });
+
+    return () => {
+      socket.current?.disconnect();
+    };
+  }, [roomID]);
+
+  // Handle real-time message updates
+  useEffect(() => {
+    if (!socket.current) return;
+
+    socket.current.on("receive message", (message: Message) => {
       setMessages((prevMessages) => {
         const existingMessage = prevMessages.find(
           (msg) =>
-            msg.content === message.content &&
-            msg.userName === message.userName &&
-            Math.abs(
-              new Date(msg.timestamp).getTime() -
-                new Date(message.timestamp).getTime()
-            ) < 1000
+            msg.id === message.id ||
+            (msg.content === message.content &&
+              msg.userName === message.userName &&
+              Math.abs(
+                new Date(msg.timestamp).getTime() -
+                  new Date(message.timestamp).getTime()
+              ) < 1000)
         );
 
         if (existingMessage) {
           return prevMessages.map((msg) =>
-            msg === existingMessage ? { ...message, status: "delivered" } : msg
+            msg === existingMessage
+              ? { ...message, status: "delivered" as const }
+              : msg
           );
         }
 
-        // Send delivery confirmation
-        socket.emit("message_delivered", {
+        const newMessage = { ...message, status: "delivered" as const };
+        socket.current?.emit("message_delivered", {
           messageId: message.id,
           userName: message.userName,
         });
 
-        return [...prevMessages, { ...message, status: "delivered" }];
+        return [...prevMessages, newMessage];
       });
       scrollToBottom();
     });
 
-    socket.on("message_delivered", ({ messageId, userName: deliveredTo }) => {
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === messageId ? { ...msg, status: "delivered" } : msg
-        )
-      );
-    });
+    socket.current.on(
+      "message_delivered",
+      ({ messageId, userName: deliveredTo }: MessageDeliveryPayload) => {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, status: "delivered" as const }
+              : msg
+          )
+        );
+      }
+    );
 
-    socket.on(
+    socket.current.on(
       "message reaction",
-      ({ messageId, reaction, previousReaction }) => {
+      ({ messageId, reaction, previousReaction }: MessageReactionPayload) => {
         setMessages((prevMessages) =>
           prevMessages.map((msg) => {
             if (msg.id === messageId) {
-              // Remove previous reaction if it exists
               const filteredReactions = previousReaction
                 ? msg.reactions.filter(
                     (r) =>
@@ -157,71 +184,60 @@ const Chat: React.FC<ChatProps> = ({
       }
     );
 
+    socket.current.on("chat_cleared", () => {
+      setMessages([]);
+    });
+
     return () => {
-      socket.off("receive message");
-      socket.off("message_delivered");
-      socket.off("message reaction");
-    };
-  }, [socket]);
-
-  const sendMessage = async () => {
-    if (newMessage.trim()) {
-      // Create optimistic message
-      const optimisticMessage: Message = {
-        id: Math.random().toString(),
-        content: newMessage,
-        userName,
-        timestamp: new Date(),
-        reactions: [],
-        status: "sending",
-        replyTo: replyingTo || undefined,
-      };
-
-      // Optimistically add the message
-      setMessages((prev) => [...prev, optimisticMessage]);
-      scrollToBottom();
-
-      // Clear input immediately
-      setNewMessage("");
-      setReplyingTo(null);
-
-      try {
-        startTransition(async () => {
-          const response = await fetch("/api/messages", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              roomId: roomID,
-              content: newMessage,
-              userName,
-              replyToId: replyingTo?.id,
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error("Failed to save message");
-          }
-
-          const savedMessage = await response.json();
-
-          // Update status to sent
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg === optimisticMessage
-                ? { ...savedMessage, status: "sent" }
-                : msg
-            )
-          );
-
-          // Emit the saved message
-          socket.emit("send message", savedMessage);
-        });
-      } catch (error) {
-        console.error("Error sending message:", error);
-        setMessages((prev) => prev.filter((msg) => msg !== optimisticMessage));
+      if (socket.current) {
+        socket.current.off("receive message");
+        socket.current.off("message_delivered");
+        socket.current.off("message reaction");
+        socket.current.off("chat_cleared");
       }
+    };
+  }, []);
+
+  const sendMessage = async (content: string) => {
+    if (!socket.current) return;
+
+    const newMessage: Message = {
+      id: crypto.randomUUID(),
+      content,
+      userName,
+      timestamp: new Date().toISOString(),
+      reactions: [],
+      status: "sending",
+    };
+
+    setMessages((prev) => [...prev, newMessage]);
+    scrollToBottom();
+
+    try {
+      const response = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...newMessage,
+          roomID,
+        }),
+      });
+
+      if (!response.ok) throw new Error("Failed to send message");
+
+      socket.current.emit("send message", {
+        ...newMessage,
+        status: "sent",
+      });
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === newMessage.id ? { ...msg, status: "sent" as const } : msg
+        )
+      );
+    } catch (error) {
+      console.error("Error sending message:", error);
+      setMessages((prev) => prev.filter((msg) => msg.id !== newMessage.id));
     }
   };
 
@@ -267,7 +283,7 @@ const Chat: React.FC<ChatProps> = ({
         );
 
         // Emit reaction removal
-        socket.emit("remove reaction", { messageId, userName, emoji });
+        socket.current?.emit("remove reaction", { messageId, userName, emoji });
       } catch (error) {
         console.error("Error removing reaction:", error);
       }
@@ -318,7 +334,7 @@ const Chat: React.FC<ChatProps> = ({
       const savedReaction = await response.json();
 
       // Emit the reaction update
-      socket.emit("add reaction", {
+      socket.current?.emit("add reaction", {
         messageId,
         reaction: savedReaction,
         previousReaction: existingReaction,
@@ -351,7 +367,7 @@ const Chat: React.FC<ChatProps> = ({
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      sendMessage(newMessage);
     }
   };
 
@@ -368,7 +384,7 @@ const Chat: React.FC<ChatProps> = ({
 
       if (response.ok) {
         setMessages([]);
-        socket.emit("chat_cleared", { roomId: roomID });
+        socket.current?.emit("chat_cleared", { roomId: roomID });
       }
     } catch (error) {
       console.error("Error clearing chat:", error);
@@ -559,7 +575,7 @@ const Chat: React.FC<ChatProps> = ({
             disabled={isLoading}
           />
           <Button
-            onClick={sendMessage}
+            onClick={() => sendMessage(newMessage)}
             size="icon"
             className="shrink-0"
             disabled={!newMessage.trim() || isLoading}
