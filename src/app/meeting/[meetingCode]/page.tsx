@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "@auth0/nextjs-auth0/client";
 import io, { Socket } from "socket.io-client";
@@ -24,6 +24,10 @@ import {
   Minimize2,
   MonitorUp,
   RotateCw,
+  Users,
+  MessageCircle,
+  Paperclip,
+  SendIcon,
 } from "lucide-react";
 import {
   Dialog,
@@ -55,6 +59,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { Drawer, DrawerContent, DrawerTrigger } from "@/components/ui/drawer";
+import Chat from "./Chat";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { cn } from "@/lib/utils";
 
 interface PeerData {
   peer: Peer.Instance;
@@ -80,6 +93,18 @@ interface SettingsState {
 }
 
 type LayoutType = "speaker" | "grid" | "sidebar";
+
+// Add this type for sidebar content
+type SidebarContent = "chat" | "participants" | null;
+
+// Add this interface near the top of the file with other interfaces
+interface User {
+  id: string;
+  userName: string;
+  isMuted: boolean;
+  isCameraOff: boolean;
+  isHost?: boolean;
+}
 
 function UserAvatar({ name }: { name: string }) {
   const initials = name
@@ -143,12 +168,44 @@ export default function Meeting({
   // Add mobile detection
   const [isMobile, setIsMobile] = useState(false);
 
+  // Add separate permission states
+  const [cameraPermission, setCameraPermission] =
+    useState<PermissionState | null>(null);
+  const [micPermission, setMicPermission] = useState<PermissionState | null>(
+    null
+  );
+
   const socketRef = useRef<Socket | null>(null);
   const userVideoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const peersRef = useRef<
     { peerID: string; peer: Peer.Instance; userName: string }[]
   >([]);
+
+  const [showParticipantsDrawer, setShowParticipantsDrawer] = useState(false);
+  const [showChatSidebar, setShowChatSidebar] = useState(false);
+
+  const [sidebarContent, setSidebarContent] = useState<SidebarContent>(null);
+  const [isHost, setIsHost] = useState(false);
+
+  // Move getMediaConstraints before the useEffect hooks
+  const getMediaConstraints = useCallback(() => {
+    const constraints: MediaStreamConstraints = {
+      audio: {
+        echoCancellation: settings.audio.echoCancellation,
+        noiseSuppression: settings.audio.noiseSuppression,
+      },
+      video: {
+        facingMode: "user", // Default to front camera
+        width: isMobile
+          ? { ideal: 640, max: 1280 }
+          : { ideal: 1280, max: 1920 },
+        height: isMobile ? { ideal: 480, max: 720 } : { ideal: 720, max: 1080 },
+        frameRate: { max: settings.video.frameRate },
+      },
+    };
+    return constraints;
+  }, [isMobile, settings.audio, settings.video.frameRate]);
 
   useEffect(() => {
     if (!user && !isLoading) {
@@ -170,25 +227,117 @@ export default function Meeting({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
+  // Update the permission check function
+  const checkAndRequestPermissions = async () => {
+    try {
+      // For mobile browsers, we need to explicitly request permissions one by one
+      try {
+        // Try camera first
+        const videoStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+        videoStream.getTracks().forEach((track) => track.stop());
+        setCameraPermission("granted");
+      } catch (error) {
+        console.error("Camera permission error:", error);
+        if (error instanceof DOMException) {
+          if (error.name === "NotAllowedError") {
+            setCameraPermission("denied");
+            setMediaError(
+              "Camera access denied. Please grant camera permission and reload."
+            );
+          } else if (error.name === "NotFoundError") {
+            setCameraPermission("denied");
+            setMediaError(
+              "No camera found. Please check your device settings."
+            );
+          }
+        }
+        return false;
+      }
+
+      // Then try microphone
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        audioStream.getTracks().forEach((track) => track.stop());
+        setMicPermission("granted");
+      } catch (error) {
+        console.error("Microphone permission error:", error);
+        if (error instanceof DOMException) {
+          if (error.name === "NotAllowedError") {
+            setMicPermission("denied");
+            setMediaError(
+              "Microphone access denied. Please grant microphone permission and reload."
+            );
+          } else if (error.name === "NotFoundError") {
+            setMicPermission("denied");
+            setMediaError(
+              "No microphone found. Please check your device settings."
+            );
+          }
+        }
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error checking permissions:", error);
+      setMediaError(
+        "An error occurred while checking device permissions. Please reload and try again."
+      );
+      return false;
+    }
+  };
+
+  // Update the main useEffect to handle permissions better
   useEffect(() => {
     if (user) {
-      const getMediaDevices = async () => {
+      const initializeMedia = async () => {
         try {
-          const permissions = await navigator.permissions.query({
-            name: "camera" as PermissionName,
-          });
-          if (permissions.state === "denied") {
-            setMediaError("Camera access denied.");
+          // Check permissions first
+          const permissionsGranted = await checkAndRequestPermissions();
+          if (!permissionsGranted) {
             return;
           }
 
-          const stream = await navigator.mediaDevices.getUserMedia(
-            getMediaConstraints()
-          );
-          setStream(stream);
+          // Now get the media stream with the proper constraints
+          const mediaStream = await navigator.mediaDevices
+            .getUserMedia(getMediaConstraints())
+            .catch((error) => {
+              if (error instanceof DOMException) {
+                if (error.name === "NotAllowedError") {
+                  if (!cameraPermission) {
+                    setMediaError(
+                      "Camera permission is required. Please grant access and reload."
+                    );
+                  } else if (!micPermission) {
+                    setMediaError(
+                      "Microphone permission is required. Please grant access and reload."
+                    );
+                  }
+                } else if (error.name === "NotReadableError") {
+                  setMediaError(
+                    "Cannot access your camera or microphone. They might be in use by another application."
+                  );
+                } else {
+                  setMediaError(
+                    `Error accessing media devices: ${error.message}`
+                  );
+                }
+              }
+              throw error;
+            });
+
+          if (!mediaStream) return;
+
+          setStream(mediaStream);
           if (userVideoRef.current) {
-            userVideoRef.current.srcObject = stream;
+            userVideoRef.current.srcObject = mediaStream;
           }
+
+          // Initialize socket connection after media is ready
           socketRef.current = io(
             process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "",
             {
@@ -203,37 +352,32 @@ export default function Meeting({
             isCameraOff: !isCameraOn,
           });
 
-          socketRef.current.on(
-            "all users",
-            (
-              users: {
-                id: string;
-                userName: string;
-                isMuted: boolean;
-                isCameraOff: boolean;
-              }[]
-            ) => {
-              const peers: PeerData[] = [];
-              users.forEach(
-                ({ id: userID, userName, isMuted, isCameraOff }) => {
-                  if (socketRef.current && socketRef.current.id) {
-                    const peer = createPeer(
-                      userID,
-                      socketRef.current.id,
-                      stream
-                    );
-                    peersRef.current.push({
-                      peerID: userID,
-                      peer,
-                      userName,
-                    });
-                    peers.push({ peer, userName, isMuted, isCameraOff });
-                  }
+          // Update host status when receiving user list
+          socketRef.current.on("all users", (users: User[]) => {
+            const currentUser = users.find(
+              (u: User) => u.id === socketRef.current?.id
+            );
+            setIsHost(currentUser?.isHost || false);
+            const peers: PeerData[] = [];
+            users.forEach(
+              ({ id: userID, userName, isMuted, isCameraOff }: User) => {
+                if (socketRef.current && socketRef.current.id) {
+                  const peer = createPeer(
+                    userID,
+                    socketRef.current.id,
+                    mediaStream
+                  );
+                  peersRef.current.push({
+                    peerID: userID,
+                    peer,
+                    userName,
+                  });
+                  peers.push({ peer, userName, isMuted, isCameraOff });
                 }
-              );
-              setPeers(peers);
-            }
-          );
+              }
+            );
+            setPeers(peers);
+          });
 
           socketRef.current.on(
             "user joined",
@@ -242,7 +386,11 @@ export default function Meeting({
               callerID: string;
               userName: string;
             }) => {
-              const peer = addPeer(payload.signal, payload.callerID, stream);
+              const peer = addPeer(
+                payload.signal,
+                payload.callerID,
+                mediaStream
+              );
               peersRef.current.push({
                 peerID: payload.callerID,
                 peer,
@@ -297,19 +445,22 @@ export default function Meeting({
               updatePeerCameraStatus(peerId, isCameraOff);
             }
           );
+
+          // Handle host status changes
+          socketRef.current.on("host_changed", ({ newHostId }) => {
+            setIsHost(socketRef.current?.id === newHostId);
+          });
         } catch (err) {
-          console.error("Error accessing media devices:", err);
-          setMediaError(
-            "Error accessing media devices. Please ensure camera and microphone permissions are granted."
-          );
+          console.error("Error in initializeMedia:", err);
+          // Error handling is now done in the getUserMedia catch block above
         }
       };
 
       if (navigator.mediaDevices) {
-        getMediaDevices();
+        initializeMedia();
       } else {
         setMediaError(
-          "Media devices are not supported on this device. Please try using a different browser or device."
+          "Your browser doesn't support media devices. Please try using a different browser."
         );
       }
 
@@ -320,7 +471,14 @@ export default function Meeting({
         }
       };
     }
-  }, [user, params.meetingCode]);
+  }, [
+    user,
+    params.meetingCode,
+    getMediaConstraints,
+    isMicOn,
+    isCameraOn,
+    isMobile,
+  ]);
 
   useEffect(() => {
     if (searchParams && searchParams.get("new") === "true") {
@@ -652,25 +810,6 @@ export default function Meeting({
     }
   }, []);
 
-  // Update media constraints for mobile
-  const getMediaConstraints = () => {
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        echoCancellation: settings.audio.echoCancellation,
-        noiseSuppression: settings.audio.noiseSuppression,
-      },
-      video: {
-        facingMode: "user", // Default to front camera
-        width: isMobile
-          ? { ideal: 640, max: 1280 }
-          : { ideal: 1280, max: 1920 },
-        height: isMobile ? { ideal: 480, max: 720 } : { ideal: 720, max: 1080 },
-        frameRate: { max: settings.video.frameRate },
-      },
-    };
-    return constraints;
-  };
-
   // Add camera switch function for mobile
   const [isBackCamera, setIsBackCamera] = useState(false);
   const switchCamera = async () => {
@@ -717,6 +856,49 @@ export default function Meeting({
     }
   };
 
+  // Update the retry function to be more specific
+  const retryMediaAccess = async () => {
+    setMediaError(null);
+    setCameraPermission(null);
+    setMicPermission(null);
+
+    if (user) {
+      // First try to get permissions
+      const permissionsGranted = await checkAndRequestPermissions();
+      if (permissionsGranted) {
+        // If on mobile, we need a full page reload
+        if (isMobile) {
+          window.location.reload();
+        } else {
+          // On desktop, we can try to reinitialize without reload
+          try {
+            const mediaStream = await navigator.mediaDevices.getUserMedia(
+              getMediaConstraints()
+            );
+            setStream(mediaStream);
+            if (userVideoRef.current) {
+              userVideoRef.current.srcObject = mediaStream;
+            }
+          } catch (error) {
+            console.error("Error retrying media access:", error);
+            setMediaError("Failed to access devices. Please reload the page.");
+          }
+        }
+      }
+    }
+  };
+
+  // Update host action handlers
+  const handleHostAction = (action: string, targetId: string) => {
+    if (!isHost || !socketRef.current) return;
+
+    socketRef.current.emit("host_action", {
+      roomId: params.meetingCode,
+      action,
+      targetId,
+    });
+  };
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -747,64 +929,34 @@ export default function Meeting({
 
   return (
     <TooltipProvider>
-      <div
-        className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900"
-        ref={containerRef}
-      >
-        <div className="flex-1 p-2 sm:p-4 overflow-hidden">
-          <div className="relative w-full h-full">
-            <AnimatePresence>
-              <motion.div
-                key="main-video"
-                className="absolute inset-0"
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                transition={{ duration: 0.3 }}
-              >
-                <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                  {peers.length > 0 ? (
-                    peers[0].isCameraOff ? (
-                      <UserAvatar name={peers[0].userName} />
-                    ) : (
-                      <Video peer={peers[0].peer} />
-                    )
-                  ) : !isCameraOn ? (
-                    <UserAvatar name={user.name || "You"} />
-                  ) : (
-                    <video
-                      ref={userVideoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                    />
-                  )}
-                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                    <span>
-                      {peers.length > 0
-                        ? peers[0].userName
-                        : user.name || "You"}{" "}
-                      {isScreenSharing && "(Screen)"}
-                    </span>
-                    {peers.length > 0
-                      ? peers[0].isMuted && <MicOff className="h-4 w-4" />
-                      : !isMicOn && <MicOff className="h-4 w-4" />}
-                  </div>
-                </Card>
-              </motion.div>
-
-              {peers.length > 0 && (
+      <div className="flex h-screen">
+        {/* Main video area - 75% when sidebar is open */}
+        <div
+          className={cn(
+            "flex flex-col transition-[width] duration-300 ease-in-out",
+            sidebarContent ? "w-3/4" : "w-full"
+          )}
+          ref={containerRef}
+        >
+          <div className="flex-1 p-2 sm:p-4 overflow-hidden">
+            <div className="relative w-full h-full">
+              <AnimatePresence>
                 <motion.div
-                  key="self-video"
-                  className={`absolute ${getVideoLayout()}`}
+                  key="main-video"
+                  className="absolute inset-0"
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
                   transition={{ duration: 0.3 }}
                 >
                   <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                    {!isCameraOn ? (
+                    {peers.length > 0 ? (
+                      peers[0].isCameraOff ? (
+                        <UserAvatar name={peers[0].userName} />
+                      ) : (
+                        <Video peer={peers[0].peer} />
+                      )
+                    ) : !isCameraOn ? (
                       <UserAvatar name={user.name || "You"} />
                     ) : (
                       <video
@@ -816,192 +968,419 @@ export default function Meeting({
                       />
                     )}
                     <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                      <span>{user.name || "You"}</span>
-                      {!isMicOn && <MicOff className="h-4 w-4" />}
+                      <span>
+                        {peers.length > 0
+                          ? peers[0].userName
+                          : user.name || "You"}{" "}
+                        {isScreenSharing && "(Screen)"}
+                      </span>
+                      {peers.length > 0
+                        ? peers[0].isMuted && <MicOff className="h-4 w-4" />
+                        : !isMicOn && <MicOff className="h-4 w-4" />}
                     </div>
                   </Card>
                 </motion.div>
-              )}
 
-              {peers
-                .slice(1)
-                .map(({ peer, userName, isMuted, isCameraOff }, index) => (
+                {peers.length > 0 && (
                   <motion.div
-                    key={index + 1}
+                    key="self-video"
                     className={`absolute ${getVideoLayout()}`}
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
                     transition={{ duration: 0.3 }}
-                    style={{
-                      top: `${Math.floor((index + 1) / 3) * 33.33}%`,
-                      left: `${((index + 1) % 3) * 33.33}%`,
-                    }}
                   >
                     <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                      {isCameraOff ? (
-                        <UserAvatar name={userName} />
+                      {!isCameraOn ? (
+                        <UserAvatar name={user.name || "You"} />
                       ) : (
-                        <Video peer={peer} />
+                        <video
+                          ref={userVideoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className="w-full h-full object-cover"
+                        />
                       )}
                       <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                        <span>{userName}</span>
-                        {isMuted && <MicOff className="h-4 w-4" />}
+                        <span>{user.name || "You"}</span>
+                        {!isMicOn && <MicOff className="h-4 w-4" />}
                       </div>
                     </Card>
                   </motion.div>
-                ))}
-            </AnimatePresence>
+                )}
+
+                {peers
+                  .slice(1)
+                  .map(({ peer, userName, isMuted, isCameraOff }, index) => (
+                    <motion.div
+                      key={index + 1}
+                      className={`absolute ${getVideoLayout()}`}
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      transition={{ duration: 0.3 }}
+                      style={{
+                        top: `${Math.floor((index + 1) / 3) * 33.33}%`,
+                        left: `${((index + 1) % 3) * 33.33}%`,
+                      }}
+                    >
+                      <Card className="w-full h-full overflow-hidden rounded-lg relative">
+                        {isCameraOff ? (
+                          <UserAvatar name={userName} />
+                        ) : (
+                          <Video peer={peer} />
+                        )}
+                        <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
+                          <span>{userName}</span>
+                          {isMuted && <MicOff className="h-4 w-4" />}
+                        </div>
+                      </Card>
+                    </motion.div>
+                  ))}
+              </AnimatePresence>
+            </div>
           </div>
-        </div>
-        <div className="p-2 sm:p-4 bg-white dark:bg-gray-800 shadow-lg">
-          <div className="flex flex-wrap justify-center sm:justify-between items-center gap-2 max-w-4xl mx-auto">
-            <div className="flex flex-wrap justify-center gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" onClick={toggleMic}>
-                    {isMicOn ? (
-                      <Mic className="h-4 w-4" />
-                    ) : (
-                      <MicOff className="h-4 w-4" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{isMicOn ? "Mute" : "Unmute"}</TooltipContent>
-              </Tooltip>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" onClick={toggleCamera}>
-                    {isCameraOn ? (
-                      <VideoIcon className="h-4 w-4" />
-                    ) : (
-                      <VideoOff className="h-4 w-4" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {isCameraOn ? "Stop Video" : "Start Video"}
-                </TooltipContent>
-              </Tooltip>
-
-              {isMobile && (
+          <div className="p-2 sm:p-4 bg-white dark:bg-gray-800 shadow-lg">
+            <div className="flex flex-wrap justify-center sm:justify-between items-center gap-2 max-w-4xl mx-auto">
+              <div className="flex flex-wrap justify-center gap-2">
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      onClick={switchCamera}
-                    >
-                      <RotateCw className="h-4 w-4" />
+                    <Button variant="outline" size="icon" onClick={toggleMic}>
+                      {isMicOn ? (
+                        <Mic className="h-4 w-4" />
+                      ) : (
+                        <MicOff className="h-4 w-4" />
+                      )}
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Switch Camera</TooltipContent>
+                  <TooltipContent>{isMicOn ? "Mute" : "Unmute"}</TooltipContent>
                 </Tooltip>
-              )}
 
-              {!isMobile && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="outline"
                       size="icon"
-                      onClick={toggleScreenShare}
+                      onClick={toggleCamera}
                     >
-                      <ScreenShare
-                        className={`h-4 w-4 ${
-                          isScreenSharing ? "text-primary" : ""
-                        }`}
-                      />
+                      {isCameraOn ? (
+                        <VideoIcon className="h-4 w-4" />
+                      ) : (
+                        <VideoOff className="h-4 w-4" />
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {isScreenSharing ? "Stop Sharing" : "Share Screen"}
+                    {isCameraOn ? "Stop Video" : "Start Video"}
                   </TooltipContent>
                 </Tooltip>
-              )}
-            </div>
 
-            <Button
-              variant="destructive"
-              onClick={leaveMeeting}
-              className="order-last sm:order-none"
-            >
-              <PhoneOff className="mr-2 h-4 w-4" /> Leave
-            </Button>
+                {isMobile && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={switchCamera}
+                      >
+                        <RotateCw className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Switch Camera</TooltipContent>
+                  </Tooltip>
+                )}
 
-            <div className="flex flex-wrap justify-center gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    onClick={copyMeetingLink}
-                    className="text-sm"
-                  >
-                    <Copy className="mr-2 h-4 w-4" /> Copy Link
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Copy Meeting Link</TooltipContent>
-              </Tooltip>
+                {!isMobile && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={toggleScreenShare}
+                      >
+                        <ScreenShare
+                          className={`h-4 w-4 ${
+                            isScreenSharing ? "text-primary" : ""
+                          }`}
+                        />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {isScreenSharing ? "Stop Sharing" : "Share Screen"}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
 
-              <DropdownMenu>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="icon">
-                        <MoreVertical className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={() =>
+                        setSidebarContent(
+                          sidebarContent === "participants"
+                            ? null
+                            : "participants"
+                        )
+                      }
+                    >
+                      <Users className="h-4 w-4" />
+                    </Button>
                   </TooltipTrigger>
-                  <TooltipContent>More Options</TooltipContent>
+                  <TooltipContent>Participants</TooltipContent>
                 </Tooltip>
 
-                <DropdownMenuContent align="end" className="z-[9999]">
-                  <DropdownMenuItem onClick={() => setShowSettingsModal(true)}>
-                    <Settings className="mr-2 h-4 w-4" /> Settings
-                  </DropdownMenuItem>
-                  {!isMobile && (
-                    <DropdownMenuItem onClick={togglePictureInPicture}>
-                      <Minimize2 className="mr-2 h-4 w-4" /> Picture in Picture
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={() =>
+                        setSidebarContent(
+                          sidebarContent === "chat" ? null : "chat"
+                        )
+                      }
+                    >
+                      <MessageCircle className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Chat</TooltipContent>
+                </Tooltip>
+              </div>
+
+              <Button
+                variant="destructive"
+                onClick={leaveMeeting}
+                className="order-last sm:order-none"
+              >
+                <PhoneOff className="mr-2 h-4 w-4" /> Leave
+              </Button>
+
+              <div className="flex flex-wrap justify-center gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={copyMeetingLink}
+                      className="text-sm"
+                    >
+                      <Copy className="mr-2 h-4 w-4" /> Copy Link
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Copy Meeting Link</TooltipContent>
+                </Tooltip>
+
+                <DropdownMenu>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="icon">
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>More Options</TooltipContent>
+                  </Tooltip>
+
+                  <DropdownMenuContent align="end" className="z-[9999]">
+                    <DropdownMenuItem
+                      onClick={() => setShowSettingsModal(true)}
+                    >
+                      <Settings className="mr-2 h-4 w-4" /> Settings
                     </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={toggleFullScreen}>
-                    {isFullScreen ? (
-                      <Minimize2 className="mr-2 h-4 w-4" />
-                    ) : (
-                      <Maximize2 className="mr-2 h-4 w-4" />
+                    {!isMobile && (
+                      <DropdownMenuItem onClick={togglePictureInPicture}>
+                        <Minimize2 className="mr-2 h-4 w-4" /> Picture in
+                        Picture
+                      </DropdownMenuItem>
                     )}
-                    {isFullScreen ? "Exit Full Screen" : "Full Screen"}
-                  </DropdownMenuItem>
-                  <DropdownMenuSub>
-                    <DropdownMenuSubTrigger>
-                      <Layout className="mr-2 h-4 w-4" /> Layout
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="z-[9999]">
-                      <DropdownMenuRadioGroup
-                        value={currentLayout}
-                        onValueChange={(value) =>
-                          setCurrentLayout(value as LayoutType)
-                        }
-                      >
-                        <DropdownMenuRadioItem value="speaker">
-                          Speaker View
-                        </DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="grid">
-                          Grid View
-                        </DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="sidebar">
-                          Sidebar View
-                        </DropdownMenuRadioItem>
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    <DropdownMenuItem onClick={toggleFullScreen}>
+                      {isFullScreen ? (
+                        <Minimize2 className="mr-2 h-4 w-4" />
+                      ) : (
+                        <Maximize2 className="mr-2 h-4 w-4" />
+                      )}
+                      {isFullScreen ? "Exit Full Screen" : "Full Screen"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        <Layout className="mr-2 h-4 w-4" /> Layout
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="z-[9999]">
+                        <DropdownMenuRadioGroup
+                          value={currentLayout}
+                          onValueChange={(value) =>
+                            setCurrentLayout(value as LayoutType)
+                          }
+                        >
+                          <DropdownMenuRadioItem value="speaker">
+                            Speaker View
+                          </DropdownMenuRadioItem>
+                          <DropdownMenuRadioItem value="grid">
+                            Grid View
+                          </DropdownMenuRadioItem>
+                          <DropdownMenuRadioItem value="sidebar">
+                            Sidebar View
+                          </DropdownMenuRadioItem>
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </div>
           </div>
         </div>
 
+        {/* Sidebar - 25% */}
+        {sidebarContent && (
+          <div className="w-1/4 border-l border-border h-screen bg-background">
+            {sidebarContent === "chat" ? (
+              <div className="flex flex-col h-full">
+                <div className="p-4 border-b">
+                  <h2 className="text-lg font-semibold">Chat</h2>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  <Chat
+                    roomID={params.meetingCode}
+                    userName={user.name || "You"}
+                    isHost={isHost}
+                    onToggleUserAudio={(userId) =>
+                      handleHostAction("mute_user", userId)
+                    }
+                    onToggleUserVideo={(userId) =>
+                      handleHostAction("disable_video", userId)
+                    }
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col h-full">
+                <div className="p-4 border-b">
+                  <h2 className="text-lg font-semibold">Participants</h2>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  <ul className="p-4 space-y-2">
+                    <li className="flex items-center justify-between">
+                      <span>{user.name || "You"} (You)</span>
+                      <div className="flex items-center space-x-2">
+                        {isCameraOn ? (
+                          <VideoIcon className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <VideoOff className="h-4 w-4 text-red-500" />
+                        )}
+                        {isMicOn ? (
+                          <Mic className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <MicOff className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
+                    </li>
+                    {peers.map(({ userName, isMuted, isCameraOff }, index) => (
+                      <li
+                        key={index}
+                        className="flex items-center justify-between"
+                      >
+                        <span>{userName}</span>
+                        <div className="flex items-center space-x-2">
+                          {isCameraOff ? (
+                            <VideoOff className="h-4 w-4 text-red-500" />
+                          ) : (
+                            <VideoIcon className="h-4 w-4 text-green-500" />
+                          )}
+                          {isMuted ? (
+                            <MicOff className="h-4 w-4 text-red-500" />
+                          ) : (
+                            <Mic className="h-4 w-4 text-green-500" />
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {showCopyToast && (
+          <motion.div
+            className="fixed bottom-4 right-4 bg-green-500 text-white p-2 rounded"
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+          >
+            Meeting link copied to clipboard!
+          </motion.div>
+        )}
+
+        {mediaError && (
+          <motion.div
+            className="fixed bottom-4 left-4 bg-red-500 text-white p-4 rounded-lg shadow-lg max-w-md"
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <p className="font-semibold">Device Access Error:</p>
+                <p className="text-sm">{mediaError}</p>
+                {(cameraPermission === "denied" ||
+                  micPermission === "denied") && (
+                  <p className="text-sm mt-1">
+                    Tip: Look for the camera/microphone icon in your
+                    browser&apos;s address bar to manage permissions.
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={retryMediaAccess}
+                  className="bg-white text-red-500 hover:bg-red-100"
+                >
+                  Retry Access
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => window.location.reload()}
+                  className="bg-white text-red-500 hover:bg-red-100"
+                >
+                  Reload Page
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        <Dialog
+          open={showNewMeetingModal}
+          onOpenChange={setShowNewMeetingModal}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>New Meeting Created</DialogTitle>
+              <DialogDescription>
+                Your meeting has been created successfully. Share this link with
+                others to invite them to the meeting.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex items-center space-x-2">
+              <Input
+                value={`${window.location.origin}/pre-join/${params.meetingCode}`}
+                readOnly
+              />
+              <Button onClick={copyMeetingLink}>
+                <Copy className="mr-2 h-4 w-4" /> Copy
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Settings Modal */}
         <Dialog open={showSettingsModal} onOpenChange={setShowSettingsModal}>
           <DialogContent className="sm:max-w-[425px] w-[95vw] max-h-[90vh] overflow-y-auto">
             <DialogHeader>
@@ -1135,52 +1514,6 @@ export default function Meeting({
                 </div>
               </TabsContent>
             </Tabs>
-          </DialogContent>
-        </Dialog>
-
-        {showCopyToast && (
-          <motion.div
-            className="fixed bottom-4 right-4 bg-green-500 text-white p-2 rounded"
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-          >
-            Meeting link copied to clipboard!
-          </motion.div>
-        )}
-
-        {mediaError && (
-          <motion.div
-            className="fixed bottom-4 left-4 bg-red-500 text-white p-2 rounded"
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-          >
-            {mediaError}
-          </motion.div>
-        )}
-
-        <Dialog
-          open={showNewMeetingModal}
-          onOpenChange={setShowNewMeetingModal}
-        >
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>New Meeting Created</DialogTitle>
-              <DialogDescription>
-                Your meeting has been created successfully. Share this link with
-                others to invite them to the meeting.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex items-center space-x-2">
-              <Input
-                value={`${window.location.origin}/pre-join/${params.meetingCode}`}
-                readOnly
-              />
-              <Button onClick={copyMeetingLink}>
-                <Copy className="mr-2 h-4 w-4" /> Copy
-              </Button>
-            </div>
           </DialogContent>
         </Dialog>
       </div>

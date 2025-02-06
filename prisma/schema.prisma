@@ -1,0 +1,42 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Message {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  roomId    String
+  content   String
+  userName  String
+  timestamp DateTime  @default(now())
+  hostId    String?   // Socket ID of the room host when message was created
+  replyTo   Message?  @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replyToId String?   @db.ObjectId
+  replies   Message[] @relation("MessageReplies")
+  reactions Reaction[]
+  mentions  String[]  // Array of usernames that are mentioned
+
+  @@map("messages") // This ensures the collection is named "messages"
+}
+
+model Reaction {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  emoji     String   // The emoji used as reaction
+  userName  String   // User who reacted
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId String   @db.ObjectId
+  timestamp DateTime @default(now())
+
+  @@unique([messageId, userName, emoji])
+  @@map("reactions") // This ensures the collection is named "reactions"
+}

@@ -41,6 +41,7 @@ import {
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { nanoid } from "nanoid";
 
 export default function Home() {
   const { scrollYProgress } = useScroll();
@@ -104,6 +105,11 @@ export default function Home() {
     }
 
     router.push(`/pre-join/${meetingCode}`);
+  };
+
+  const createNewMeeting = () => {
+    const meetingCode = nanoid(10);
+    router.push(`/meeting/${meetingCode}?new=true`);
   };
 
   return (
