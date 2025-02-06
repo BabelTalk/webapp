@@ -68,6 +68,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 interface PeerData {
   peer: Peer.Instance;
@@ -445,7 +446,18 @@ export default function Meeting({
           socketRef.current.on(
             "peer_camera_status",
             ({ peerId, isCameraOff }) => {
-              updatePeerCameraStatus(peerId, isCameraOff);
+              setPeers((currentPeers) =>
+                currentPeers.map((peer) => {
+                  const peerRef = peersRef.current.find(
+                    (p) => p.peerID === peerId
+                  );
+                  if (peerRef?.peer === peer.peer) {
+                    // Update the camera status without recreating the peer object
+                    return { ...peer, isCameraOff };
+                  }
+                  return peer;
+                })
+              );
             }
           );
 
@@ -913,20 +925,17 @@ export default function Meeting({
     const totalParticipants = peers.length + 1;
 
     if (isScreenSharing) {
+      // When screen sharing, user's video should be small
       return "w-1/4 h-1/4 bottom-4 right-4";
     }
 
-    switch (totalParticipants) {
-      case 1:
-        return "w-full h-full";
-      case 2:
-        return "w-1/4 h-1/4 bottom-4 right-4";
-      case 3:
-      case 4:
-        return "w-1/2 h-1/2";
-      default:
-        return "w-1/3 h-1/3";
+    // For the current user's video
+    if (totalParticipants > 1) {
+      return "w-1/4 h-1/4 absolute bottom-4 right-4 z-10";
     }
+
+    // When user is alone
+    return "w-full h-full";
   };
 
   return (
@@ -942,54 +951,24 @@ export default function Meeting({
         >
           <div className="flex-1 p-2 sm:p-4 overflow-hidden">
             <div className="relative w-full h-full">
+              {/* Display other participants' videos */}
               <AnimatePresence>
-                <motion.div
-                  key="main-video"
-                  className="absolute inset-0"
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                    {!isCameraOn ? (
-                      <UserAvatar name={user.name || "You"} />
-                    ) : (
-                      <video
-                        ref={userVideoRef}
-                        autoPlay
-                        muted
-                        playsInline
-                        className="w-full h-full object-cover mirror"
-                      />
-                    )}
-                    <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
-                      <span>{user.name || "You"}</span>
-                      {!isMicOn && <MicOff className="h-4 w-4" />}
-                    </div>
-                  </Card>
-                </motion.div>
-
                 {peers.map(
                   ({ peer, userName, isMuted, isCameraOff }, index) => (
                     <motion.div
-                      key={index}
-                      className={`absolute ${getVideoLayout()}`}
+                      key={`peer-${index}`}
+                      className="absolute inset-0"
                       initial={{ opacity: 0, scale: 0.8 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.8 }}
                       transition={{ duration: 0.3 }}
-                      style={{
-                        top: `${Math.floor(index / 2) * 50}%`,
-                        left: `${(index % 2) * 50}%`,
-                      }}
                     >
                       <Card className="w-full h-full overflow-hidden rounded-lg relative">
-                        {isCameraOff ? (
-                          <UserAvatar name={userName} />
-                        ) : (
-                          <Video peer={peer} />
-                        )}
+                        <Video
+                          peer={peer}
+                          isCameraOff={isCameraOff}
+                          userName={userName}
+                        />
                         <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
                           <span>{userName}</span>
                           {isMuted && <MicOff className="h-4 w-4" />}
@@ -999,6 +978,33 @@ export default function Meeting({
                   )
                 )}
               </AnimatePresence>
+
+              {/* Display user's own video */}
+              <motion.div
+                className={cn("rounded-lg overflow-hidden", getVideoLayout())}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ duration: 0.3 }}
+              >
+                <Card className="w-full h-full overflow-hidden rounded-lg relative">
+                  {!isCameraOn ? (
+                    <UserAvatar name={user.name || "You"} />
+                  ) : (
+                    <video
+                      ref={userVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover mirror"
+                    />
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
+                    <span>{user.name || "You"}</span>
+                    {!isMicOn && <MicOff className="h-4 w-4" />}
+                  </div>
+                </Card>
+              </motion.div>
             </div>
           </div>
           <div className="p-2 sm:p-4 bg-white dark:bg-gray-800 shadow-lg">
@@ -1237,26 +1243,87 @@ export default function Meeting({
                         )}
                       </div>
                     </li>
-                    {peers.map(({ userName, isMuted, isCameraOff }, index) => (
-                      <li
-                        key={index}
-                        className="flex items-center justify-between"
-                      >
-                        <span>{userName}</span>
-                        <div className="flex items-center space-x-2">
-                          {isCameraOff ? (
-                            <VideoOff className="h-4 w-4 text-red-500" />
-                          ) : (
-                            <VideoIcon className="h-4 w-4 text-green-500" />
-                          )}
-                          {isMuted ? (
-                            <MicOff className="h-4 w-4 text-red-500" />
-                          ) : (
-                            <Mic className="h-4 w-4 text-green-500" />
-                          )}
-                        </div>
-                      </li>
-                    ))}
+                    {peers.map(
+                      ({ peer, userName, isMuted, isCameraOff }, index) => (
+                        <li
+                          key={index}
+                          className="flex items-center justify-between p-2 hover:bg-muted/50 rounded-md"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Avatar className="h-8 w-8">
+                              <AvatarFallback>
+                                {userName[0].toUpperCase()}
+                              </AvatarFallback>
+                            </Avatar>
+                            <span>{userName}</span>
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {isHost && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() =>
+                                    handleHostAction(
+                                      "mute_user",
+                                      peersRef.current[index].peerID
+                                    )
+                                  }
+                                  title={
+                                    isMuted
+                                      ? "Unmute participant"
+                                      : "Mute participant"
+                                  }
+                                >
+                                  {isMuted ? (
+                                    <MicOff className="h-4 w-4 text-red-500" />
+                                  ) : (
+                                    <Mic className="h-4 w-4 text-green-500" />
+                                  )}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  onClick={() =>
+                                    handleHostAction(
+                                      "disable_video",
+                                      peersRef.current[index].peerID
+                                    )
+                                  }
+                                  title={
+                                    isCameraOff
+                                      ? "Enable camera"
+                                      : "Disable camera"
+                                  }
+                                >
+                                  {isCameraOff ? (
+                                    <VideoOff className="h-4 w-4 text-red-500" />
+                                  ) : (
+                                    <VideoIcon className="h-4 w-4 text-green-500" />
+                                  )}
+                                </Button>
+                              </>
+                            )}
+                            {!isHost && (
+                              <>
+                                {isCameraOff ? (
+                                  <VideoOff className="h-4 w-4 text-red-500" />
+                                ) : (
+                                  <VideoIcon className="h-4 w-4 text-green-500" />
+                                )}
+                                {isMuted ? (
+                                  <MicOff className="h-4 w-4 text-red-500" />
+                                ) : (
+                                  <Mic className="h-4 w-4 text-green-500" />
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </li>
+                      )
+                    )}
                   </ul>
                 </div>
               </div>
@@ -1481,16 +1548,35 @@ export default function Meeting({
   );
 }
 
-function Video({ peer }: { peer: Peer.Instance }) {
+function Video({
+  peer,
+  isCameraOff,
+  userName,
+}: {
+  peer: Peer.Instance;
+  isCameraOff: boolean;
+  userName: string;
+}) {
   const ref = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
+    if (isCameraOff) {
+      if (ref.current) {
+        ref.current.srcObject = null;
+      }
+      return;
+    }
+
     peer.on("stream", (stream) => {
       if (ref.current) {
         ref.current.srcObject = stream;
       }
     });
-  }, [peer]);
+  }, [peer, isCameraOff]);
+
+  if (isCameraOff) {
+    return <UserAvatar name={userName} />;
+  }
 
   return (
     <video

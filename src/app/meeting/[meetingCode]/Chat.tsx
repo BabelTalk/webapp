@@ -44,6 +44,7 @@ interface Message {
   reactions: Reaction[];
   status?: "sending" | "sent" | "delivered";
   replyTo?: Message;
+  roomId: string;
 }
 
 interface MessageDeliveryPayload {
@@ -70,8 +71,8 @@ const Chat: React.FC<ChatProps> = ({
   const [newMessage, setNewMessage] = useState("");
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [isPending, startTransition] = useTransition();
-  const [isLoading, setIsLoading] = useState(true);
-  const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isOpen, setIsOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const socket = useRef<Socket | null>(null);
@@ -81,32 +82,33 @@ const Chat: React.FC<ChatProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
-
-    const fetchMessages = async () => {
-      try {
-        const response = await fetch(`/api/messages/${roomID}`);
-        if (!response.ok) throw new Error("Failed to fetch messages");
-        const data = await response.json();
-        setMessages(data);
-        scrollToBottom();
-      } catch (error) {
-        console.error("Error fetching messages:", error);
-      }
-    };
+    socket.current = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "", {
+      query: { roomID },
+      transports: ["websocket", "polling"],
+    });
 
     fetchMessages();
-  }, [isOpen, roomID]);
-
-  useEffect(() => {
-    socket.current = io(process.env.NEXT_PUBLIC_SOCKET_URL || "", {
-      query: { roomID },
-    });
 
     return () => {
       socket.current?.disconnect();
     };
   }, [roomID]);
+
+  const fetchMessages = async () => {
+    try {
+      setIsLoading(true);
+      const response = await fetch(`/api/messages?roomId=${roomID}`);
+      if (response.ok) {
+        const data = await response.json();
+        setMessages(data);
+        scrollToBottom();
+      }
+    } catch (error) {
+      console.error("Error fetching messages:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Handle real-time message updates
   useEffect(() => {
@@ -208,6 +210,7 @@ const Chat: React.FC<ChatProps> = ({
       timestamp: new Date().toISOString(),
       reactions: [],
       status: "sending",
+      roomId: roomID,
     };
 
     setMessages((prev) => [...prev, newMessage]);
@@ -219,25 +222,33 @@ const Chat: React.FC<ChatProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...newMessage,
-          roomID,
+          roomId: roomID,
         }),
       });
 
-      if (!response.ok) throw new Error("Failed to send message");
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to send message");
+      }
+
+      const savedMessage = await response.json();
 
       socket.current.emit("send message", {
-        ...newMessage,
+        ...savedMessage,
         status: "sent",
       });
 
       setMessages((prev) =>
         prev.map((msg) =>
-          msg.id === newMessage.id ? { ...msg, status: "sent" as const } : msg
+          msg.id === newMessage.id
+            ? { ...savedMessage, status: "sent" as const }
+            : msg
         )
       );
     } catch (error) {
       console.error("Error sending message:", error);
       setMessages((prev) => prev.filter((msg) => msg.id !== newMessage.id));
+      throw error;
     }
   };
 
