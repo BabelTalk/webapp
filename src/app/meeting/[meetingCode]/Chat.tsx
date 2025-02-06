@@ -379,7 +379,7 @@ const Chat: React.FC<ChatProps> = ({
     <div className="flex h-full flex-col">
       {/* Messages Area */}
       <div className="flex justify-between items-center p-4 border-b">
-        <h2 className="text-lg font-semibold">Chat</h2>
+        {/* <h2 className="text-lg font-semibold">Chat</h2> */}
         {isHost && (
           <Button
             variant="destructive"
