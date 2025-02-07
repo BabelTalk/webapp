@@ -514,6 +514,20 @@ export default function Meeting({
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:global.stun.twilio.com:3478" },
         ],
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: "all",
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+      },
+      sdpTransform: (sdp) => {
+        // Force using secure encryption suites
+        return sdp.replace(
+          /a=crypto:.*$/gm,
+          "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:" +
+            Array.from(crypto.getRandomValues(new Uint8Array(30)))
+              .map((b) => b.toString(16).padStart(2, "0"))
+              .join("")
+        );
       },
     });
 

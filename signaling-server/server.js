@@ -4,20 +4,49 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const { MongoClient, ObjectId } = require("mongodb");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
+const xss = require("xss");
 
 const app = express();
-app.use(cors());
+
+// Security middleware
+app.use(helmet());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || "*",
+    methods: ["GET", "POST"],
+    credentials: true,
+  })
+);
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+});
+app.use(limiter);
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST"],
+    credentials: true,
   },
+  maxHttpBufferSize: 1e6, // 1 MB max message size
+  pingTimeout: 20000,
+  pingInterval: 25000,
 });
 
 // MongoDB connection
-const mongoClient = new MongoClient(process.env.DATABASE_URL);
+const mongoClient = new MongoClient(process.env.DATABASE_URL, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  maxPoolSize: 50,
+  connectTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+});
 let db;
 
 const roomHosts = new Map(); // In-memory store of room hosts
@@ -37,46 +66,104 @@ connectToMongo();
 // Store active rooms and their participants
 const rooms = {};
 
-// Add this function to check if a room exists and get its host
-async function getRoomHost(roomId) {
-  try {
-    const message = await db.collection("messages").findOne({ roomId });
-    if (message) {
-      return message.hostId; // Return the hostId of the first message in the room
-    }
-    return null;
-  } catch (error) {
-    console.error("Error getting room host:", error);
-    return null;
+// Rate limiting for socket connections
+const socketRateLimiter = new Map();
+const RATE_LIMIT = {
+  messages: { count: 50, timeWindow: 60000 }, // 50 messages per minute
+  signals: { count: 100, timeWindow: 60000 }, // 100 signals per minute
+  connections: { count: 10, timeWindow: 60000 }, // 10 connections per minute
+};
+
+function checkRateLimit(socketId, type) {
+  if (!socketRateLimiter.has(socketId)) {
+    socketRateLimiter.set(socketId, {
+      messages: { count: 0, lastReset: Date.now() },
+      signals: { count: 0, lastReset: Date.now() },
+      connections: { count: 0, lastReset: Date.now() },
+    });
   }
+
+  const limits = socketRateLimiter.get(socketId);
+  const now = Date.now();
+
+  if (now - limits[type].lastReset > RATE_LIMIT[type].timeWindow) {
+    limits[type].count = 0;
+    limits[type].lastReset = now;
+  }
+
+  limits[type].count++;
+  return limits[type].count <= RATE_LIMIT[type].count;
+}
+
+// Input validation functions
+function validateRoomId(roomId) {
+  return (
+    typeof roomId === "string" &&
+    roomId.length >= 6 &&
+    roomId.length <= 50 &&
+    /^[a-zA-Z0-9-_]+$/.test(roomId)
+  );
+}
+
+function validateUserName(userName) {
+  return (
+    typeof userName === "string" &&
+    userName.length >= 1 &&
+    userName.length <= 50 &&
+    /^[a-zA-Z0-9-_ ]+$/.test(userName)
+  );
+}
+
+function sanitizeMessage(content) {
+  return xss(content, {
+    whiteList: {}, // Disable all HTML tags
+    stripIgnoreTag: true,
+    stripIgnoreTagBody: ["script", "style"],
+  });
 }
 
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
-  // Handle chat messages
+  if (!checkRateLimit(socket.id, "connections")) {
+    socket.emit("error", { message: "Too many connection attempts" });
+    socket.disconnect(true);
+    return;
+  }
+
+  // Handle chat messages with rate limiting and validation
   socket.on(
     "send message",
     async ({ roomID, content, userName, replyTo, mentions }) => {
       try {
+        if (!checkRateLimit(socket.id, "messages")) {
+          socket.emit("error", { message: "Message rate limit exceeded" });
+          return;
+        }
+
+        if (!validateRoomId(roomID) || !validateUserName(userName)) {
+          socket.emit("error", { message: "Invalid input parameters" });
+          return;
+        }
+
+        const sanitizedContent = sanitizeMessage(content);
         const message = {
           roomId: roomID,
-          content,
+          content: sanitizedContent,
           userName,
           timestamp: new Date(),
           replyTo,
           reactions: [],
-          mentions,
+          mentions: mentions?.map((m) => sanitizeMessage(m)),
         };
 
-        // Save to MongoDB
         const result = await db.collection("messages").insertOne(message);
         message.id = result.insertedId;
 
-        // Broadcast to room
         io.to(roomID).emit("receive message", message);
       } catch (error) {
         console.error("Error saving message:", error);
+        socket.emit("error", { message: "Failed to save message" });
       }
     }
   );
@@ -107,6 +194,22 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join room", async ({ roomID, userName, isMuted, isCameraOff }) => {
+    if (!checkRateLimit(socket.id, "connections")) {
+      socket.emit("error", { message: "Room join rate limit exceeded" });
+      return;
+    }
+
+    if (!validateRoomId(roomID) || !validateUserName(userName)) {
+      socket.emit("error", { message: "Invalid room ID or username" });
+      return;
+    }
+
+    // Maximum room size check
+    if (rooms[roomID] && rooms[roomID].length >= 50) {
+      socket.emit("error", { message: "Room is full" });
+      return;
+    }
+
     console.log(`User ${userName} joining room ${roomID}`);
 
     let isHost = false;
@@ -179,6 +282,19 @@ io.on("connection", (socket) => {
   });
 
   socket.on("sending signal", (payload) => {
+    if (!checkRateLimit(socket.id, "signals")) {
+      socket.emit("error", { message: "Signal rate limit exceeded" });
+      return;
+    }
+
+    if (
+      !validateRoomId(payload.roomID) ||
+      !validateUserName(payload.userName)
+    ) {
+      socket.emit("error", { message: "Invalid signal parameters" });
+      return;
+    }
+
     io.to(payload.userToSignal).emit("user joined", {
       signal: payload.signal,
       callerID: payload.callerID,
@@ -280,6 +396,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    socketRateLimiter.delete(socket.id);
     console.log("Client disconnected:", socket.id);
 
     // Check if this socket was a host
@@ -315,4 +432,10 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`Signaling server running on port ${PORT}`);
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send("Something broke!");
 });

@@ -49,10 +49,47 @@ const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
     io.on("connection", (socket) => {
       console.log("New socket connection established");
 
+      // Add rate limiting
+      let messageCount = 0;
+      let resetTime = Date.now();
+      const MAX_MESSAGES = 100;
+      const RESET_INTERVAL = 60000; // 1 minute
+
+      const checkRateLimit = () => {
+        if (Date.now() - resetTime > RESET_INTERVAL) {
+          messageCount = 0;
+          resetTime = Date.now();
+          return true;
+        }
+        return messageCount++ < MAX_MESSAGES;
+      };
+
       socket.on(
         "join room",
         ({ roomID, userName }: { roomID: string; userName: string }) => {
+          // Validate input
+          if (
+            typeof roomID !== "string" ||
+            typeof userName !== "string" ||
+            !roomID.match(/^[a-zA-Z0-9-_]+$/) ||
+            userName.length > 50
+          ) {
+            socket.emit("error", { message: "Invalid input" });
+            return;
+          }
+
+          if (!checkRateLimit()) {
+            socket.emit("error", { message: "Rate limit exceeded" });
+            return;
+          }
+
           if (rooms[roomID]) {
+            // Check room size limit
+            if (rooms[roomID].length >= 50) {
+              // Limit to 50 users per room
+              socket.emit("error", { message: "Room is full" });
+              return;
+            }
             rooms[roomID].push({ id: socket.id, userName });
           } else {
             rooms[roomID] = [{ id: socket.id, userName }];
