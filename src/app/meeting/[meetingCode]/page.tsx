@@ -340,12 +340,13 @@ export default function Meeting({
           }
 
           // Initialize socket connection
-          socketRef.current = io(
-            process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "",
-            {
-              transports: ["websocket", "polling"],
-            }
+          console.log(
+            "Connecting to signaling server:",
+            "https://6f61-152-58-16-79.ngrok-free.app"
           );
+          socketRef.current = io("https://6f61-152-58-16-79.ngrok-free.app", {
+            transports: ["websocket", "polling"],
+          });
 
           // Join the room
           socketRef.current.emit("join room", {

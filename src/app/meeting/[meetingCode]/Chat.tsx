@@ -82,7 +82,7 @@ const Chat: React.FC<ChatProps> = ({
   };
 
   useEffect(() => {
-    socket.current = io(process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "", {
+    socket.current = io("https://6f61-152-58-16-79.ngrok-free.app", {
       query: { roomID },
       transports: ["websocket", "polling"],
     });
