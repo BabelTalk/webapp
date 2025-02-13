@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  quasi-peer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=${PORT:-3000}
+      - HOST=${HOST:-0.0.0.0}
+      - REDIS_URL=redis://redis:6379
+      - MAX_PARTICIPANTS=${MAX_PARTICIPANTS:-50}
+      - MAX_BITRATE=${MAX_BITRATE:-2000000}
+      - MIN_BITRATE=${MIN_BITRATE:-100000}
+      - INITIAL_BITRATE=${INITIAL_BITRATE:-500000}
+      - ADAPTIVE_BITRATE_ENABLED=${ADAPTIVE_BITRATE_ENABLED:-true}
+      - VIDEO_CODECS=${VIDEO_CODECS:-VP8,VP9,H264}
+      - AUDIO_CODECS=${AUDIO_CODECS:-opus,PCMU,PCMA}
+      - TRANSCRIPTION_ENABLED=${TRANSCRIPTION_ENABLED:-true}
+      - TRANSLATION_ENABLED=${TRANSLATION_ENABLED:-true}
+      - SUMMARIZATION_ENABLED=${SUMMARIZATION_ENABLED:-true}
+      - SUPPORTED_LANGUAGES=${SUPPORTED_LANGUAGES:-en,es,fr,de,zh,ja,ko}
+      - JWT_SECRET=${JWT_SECRET}
+      - E2E_ENABLED=${E2E_ENABLED:-true}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_CLOUD_KEY=${GOOGLE_CLOUD_KEY}
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - quasi-peer-network
+    deploy:
+      replicas: ${REPLICAS:-3}
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+        window: 120s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - quasi-peer-network
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - quasi-peer-network
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    networks:
+      - quasi-peer-network
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+volumes:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  quasi-peer-network:
+    driver: overlay
+    attachable: true 

@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quasi-peer
+  namespace: quasi-peer-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: quasi-peer
+  template:
+    metadata:
+      labels:
+        app: quasi-peer
+    spec:
+      containers:
+      - name: quasi-peer
+        image: quasi-peer:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: quasi-peer-config
+              key: redis-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: quasi-peer-secrets
+              key: jwt-secret
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quasi-peer-secrets
+              key: encryption-key
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quasi-peer-secrets
+              key: openai-api-key
+        - name: GOOGLE_CLOUD_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quasi-peer-secrets
+              key: google-cloud-key
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quasi-peer
+  namespace: quasi-peer-system
+spec:
+  selector:
+    app: quasi-peer
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quasi-peer-config
+  namespace: quasi-peer-system
+data:
+  redis-url: "redis://redis-service:6379"
+  max-participants: "50"
+  video-codecs: "VP8,VP9,H264"
+  audio-codecs: "opus,PCMU,PCMA"
+  supported-languages: "en,es,fr,de,zh,ja,ko"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quasi-peer-secrets
+  namespace: quasi-peer-system
+type: Opaque
+data:
+  jwt-secret: ${JWT_SECRET_BASE64}
+  encryption-key: ${ENCRYPTION_KEY_BASE64}
+  openai-api-key: ${OPENAI_API_KEY_BASE64}
+  google-cloud-key: ${GOOGLE_CLOUD_KEY_BASE64}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quasi-peer-ingress
+  namespace: quasi-peer-system
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - quasi-peer.example.com
+    secretName: quasi-peer-tls
+  rules:
+  - host: quasi-peer.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: quasi-peer
+            port:
+              number: 3000 
