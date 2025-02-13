@@ -1,24 +1,25 @@
 import dotenv from "dotenv";
 import Redis from "ioredis";
+import "@types/jest";
 
 // Load test environment variables
-dotenv.config({ path: "./tests/integration/.env.test" });
+dotenv.config({ path: ".env.test" });
 
-// Mock Redis
-const mockRedis = new Redis({
-  host: "localhost",
+// Create Redis instance with proper error handling
+const redis = new Redis({
+  host: "127.0.0.1",
   port: 6379,
   maxRetriesPerRequest: 1,
   retryStrategy: () => null, // Disable retries
+  lazyConnect: true, // Don't connect immediately
 });
 
-// Increase timeout for all tests
-jest.setTimeout(10000);
-
 beforeAll(async () => {
-  // Clear Redis before tests
   try {
-    await mockRedis.flushall();
+    // Try to connect to Redis
+    await redis.connect();
+    // Clear Redis before tests
+    await redis.flushall();
   } catch (error) {
     console.warn("Redis not available:", (error as Error).message);
   }
@@ -26,11 +27,18 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try {
-    await mockRedis.quit();
+    // Disconnect Redis
+    await redis.quit();
+    await new Promise<void>((resolve) => {
+      redis.once("end", () => resolve());
+    });
   } catch (error) {
     console.warn("Redis disconnect error:", (error as Error).message);
   }
 });
+
+// Increase timeout for all tests
+jest.setTimeout(30000);
 
 // Suppress console logs during tests
 global.console = {

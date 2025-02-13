@@ -1,49 +1,41 @@
-import { io as Client, Socket } from "socket.io-client";
-import { QuasiPeerServer } from "../../src/core/QuasiPeerServer";
-import { Device, Transport } from "mediasoup-client/lib/types";
-import { Participant, ParticipantRole } from "../../src/types";
+import { io as Client } from "socket.io-client";
+import { Device } from "mediasoup-client";
+import { QuasiPeerServer } from "../../src/core/QuasiPeerServer.js";
 import {
-  TransportParameters,
-  TranscriptionResult,
-  TranslationResult,
-} from "./types";
+  Participant,
+  ParticipantRole,
+  ConnectionInfo,
+} from "../../src/types/index.js";
+import { jest } from "@jest/globals";
 
-// Mock mediasoup-client Device with proper capabilities
+// Mock mediasoup-client Device
 jest.mock("mediasoup-client", () => {
   const mockTransport = {
     id: "test-transport-id",
-    connect: jest.fn().mockResolvedValue(undefined),
-    produce: jest.fn().mockResolvedValue({ id: "test-producer-id" }),
-    on: jest.fn((event, callback) => {
-      if (event === "connect") {
-        setTimeout(() => callback({ dtlsParameters: {} }, () => {}), 100);
-      }
-      if (event === "produce") {
-        setTimeout(
-          () =>
-            callback({ kind: "audio", rtpParameters: {} }, (id: string) => {}),
-          100
-        );
-      }
-    }),
+    connect: jest.fn().mockImplementation(() => Promise.resolve()),
+    produce: jest
+      .fn()
+      .mockImplementation(() => Promise.resolve({ id: "test-producer-id" })),
+  };
+
+  const mockDevice = {
+    load: jest.fn().mockImplementation(() => Promise.resolve()),
+    createSendTransport: jest
+      .fn()
+      .mockImplementation(() => Promise.resolve(mockTransport)),
   };
 
   return {
-    Device: jest.fn().mockImplementation(() => ({
-      load: jest.fn().mockResolvedValue(undefined),
-      createSendTransport: jest.fn().mockReturnValue(mockTransport),
-      rtpCapabilities: { codecs: [] },
-    })),
+    Device: jest.fn().mockImplementation(() => mockDevice),
   };
 });
 
-describe("QuasiPeer Server Integration Tests", () => {
-  let server: QuasiPeerServer;
-  let client1: Socket;
-  let client2: Socket;
-  const PORT = 3001;
-  const TEST_MEETING_ID = "test-meeting";
+const PORT = process.env.PORT || 3002;
+let server: QuasiPeerServer;
+let client1: ReturnType<typeof Client>;
+let client2: ReturnType<typeof Client>;
 
+describe("QuasiPeer Server Integration Tests", () => {
   beforeAll(async () => {
     server = new QuasiPeerServer();
     await server.start();
@@ -51,8 +43,6 @@ describe("QuasiPeer Server Integration Tests", () => {
 
   afterAll(async () => {
     await server.stop();
-    // Ensure all connections are closed
-    await new Promise((resolve) => setTimeout(resolve, 1000));
   });
 
   beforeEach(() => {
@@ -66,10 +56,9 @@ describe("QuasiPeer Server Integration Tests", () => {
     });
   });
 
-  afterEach(async () => {
-    if (client1.connected) client1.close();
-    if (client2.connected) client2.close();
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  afterEach(() => {
+    client1.close();
+    client2.close();
   });
 
   test("should connect to server", (done) => {
@@ -91,137 +80,134 @@ describe("QuasiPeer Server Integration Tests", () => {
       },
     };
 
-    client1.emit("join-meeting", {
-      meetingId: TEST_MEETING_ID,
-      participantInfo,
-    });
-
-    client1.on("transport-parameters", (params: TransportParameters) => {
-      expect(params).toHaveProperty("id");
-      expect(params).toHaveProperty("iceParameters");
-      expect(params).toHaveProperty("iceCandidates");
-      expect(params).toHaveProperty("dtlsParameters");
-      done();
+    client1.on("connect", () => {
+      client1.emit(
+        "join-meeting",
+        "test-meeting",
+        participantInfo,
+        (response: any) => {
+          expect(response.success).toBe(true);
+          expect(response.participant.id).toBeDefined();
+          done();
+        }
+      );
     });
   });
 
   test("should handle WebRTC transport creation", async () => {
     const device = new Device();
 
-    // Wait for server connection
+    // Wait for connection
     await new Promise<void>((resolve) => {
       client1.on("connect", resolve);
     });
 
-    const joinPromise = new Promise<Transport>((resolve) => {
-      client1.emit("join-meeting", {
-        meetingId: TEST_MEETING_ID,
-        participantInfo: {
-          preferredLanguage: "en",
-          role: ParticipantRole.PARTICIPANT,
-          connectionInfo: {
-            ip: "127.0.0.1",
-            userAgent: "test-agent",
-            bandwidth: 1000000,
-            latency: 50,
-          },
+    // Join meeting first
+    await new Promise<void>((resolve) => {
+      const participantInfo: Partial<Participant> = {
+        preferredLanguage: "en",
+        role: ParticipantRole.PARTICIPANT,
+        connectionInfo: {
+          ip: "127.0.0.1",
+          userAgent: "test-agent",
+          bandwidth: 1000000,
+          latency: 50,
         },
-      });
+      };
 
-      client1.on(
-        "transport-parameters",
-        async (params: TransportParameters) => {
-          await device.load({ routerRtpCapabilities: { codecs: [] } });
-          const transport = device.createSendTransport(params);
-          resolve(transport);
-        }
+      client1.emit("join-meeting", "test-meeting", participantInfo, () =>
+        resolve()
       );
     });
 
-    const transport = await joinPromise;
+    // Request transport creation
+    const transportOptions = await new Promise<any>((resolve) => {
+      client1.emit("create-transport", { type: "send" }, (response: any) => {
+        expect(response.success).toBe(true);
+        expect(response.transport).toBeDefined();
+        resolve(response.transport);
+      });
+    });
+
+    await device.load({
+      routerRtpCapabilities: transportOptions.rtpCapabilities,
+    });
+    const transport = await device.createSendTransport(transportOptions);
     expect(transport).toBeDefined();
     expect(transport.id).toBe("test-transport-id");
   });
 
-  test("should handle transcription request", (done) => {
-    let timeoutId: NodeJS.Timeout;
+  test("should handle transcription request", async () => {
+    // Wait for connection
+    await new Promise<void>((resolve) => {
+      client1.on("connect", resolve);
+    });
 
-    // Wait for connection before sending request
-    client1.on("connect", async () => {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      client1.emit("join-meeting", {
-        meetingId: TEST_MEETING_ID,
-        participantInfo: {
-          preferredLanguage: "en",
-          role: ParticipantRole.PARTICIPANT,
-          connectionInfo: {
-            ip: "127.0.0.1",
-            userAgent: "test-agent",
-            bandwidth: 1000000,
-            latency: 50,
-          },
+    // Join meeting first
+    await new Promise<void>((resolve) => {
+      const participantInfo: Partial<Participant> = {
+        preferredLanguage: "en",
+        role: ParticipantRole.PARTICIPANT,
+        connectionInfo: {
+          ip: "127.0.0.1",
+          userAgent: "test-agent",
+          bandwidth: 1000000,
+          latency: 50,
         },
-      });
+      };
 
-      // Wait for join confirmation
-      client1.on("joined-meeting", () => {
-        const audioData = Buffer.from("test audio data");
-        client1.emit("transcription-request", audioData);
-      });
+      client1.emit("join-meeting", "test-meeting", participantInfo, () =>
+        resolve()
+      );
     });
 
-    client1.on("transcription-result", (result: TranscriptionResult) => {
-      clearTimeout(timeoutId);
-      expect(result).toBeDefined();
-      done();
+    // Test transcription request
+    const response = await new Promise<any>((resolve) => {
+      client1.emit(
+        "transcribe",
+        { audio: Buffer.from("test audio data"), language: "en" },
+        (result: any) => resolve(result)
+      );
     });
 
-    // Increase timeout for transcription
-    timeoutId = setTimeout(() => {
-      done(new Error("Transcription timeout"));
-    }, 8000);
+    expect(response.success).toBe(true);
+    expect(response.text).toBeDefined();
   });
 
-  test("should handle translation request", (done) => {
-    let timeoutId: NodeJS.Timeout;
+  test("should handle translation request", async () => {
+    // Wait for connection
+    await new Promise<void>((resolve) => {
+      client1.on("connect", resolve);
+    });
 
-    // Wait for connection before sending request
-    client1.on("connect", async () => {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      client1.emit("join-meeting", {
-        meetingId: TEST_MEETING_ID,
-        participantInfo: {
-          preferredLanguage: "en",
-          role: ParticipantRole.PARTICIPANT,
-          connectionInfo: {
-            ip: "127.0.0.1",
-            userAgent: "test-agent",
-            bandwidth: 1000000,
-            latency: 50,
-          },
+    // Join meeting first
+    await new Promise<void>((resolve) => {
+      const participantInfo: Partial<Participant> = {
+        preferredLanguage: "en",
+        role: ParticipantRole.PARTICIPANT,
+        connectionInfo: {
+          ip: "127.0.0.1",
+          userAgent: "test-agent",
+          bandwidth: 1000000,
+          latency: 50,
         },
-      });
+      };
 
-      // Wait for join confirmation
-      client1.on("joined-meeting", () => {
-        client1.emit("translation-request", {
-          text: "Hello, world!",
-          targetLanguage: "es",
-        });
-      });
+      client1.emit("join-meeting", "test-meeting", participantInfo, () =>
+        resolve()
+      );
     });
 
-    client1.on("translation-result", (result: TranslationResult) => {
-      clearTimeout(timeoutId);
-      expect(result).toBeDefined();
-      done();
+    // Test translation request
+    const response = await new Promise<any>((resolve) => {
+      client1.emit(
+        "translate",
+        { text: "Hello", fromLang: "en", toLang: "es" },
+        (result: any) => resolve(result)
+      );
     });
 
-    // Increase timeout for translation
-    timeoutId = setTimeout(() => {
-      done(new Error("Translation timeout"));
-    }, 8000);
+    expect(response.success).toBe(true);
+    expect(response.translation).toBeDefined();
   });
 });

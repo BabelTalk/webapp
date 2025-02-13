@@ -1,15 +1,17 @@
-module.exports = {
-  preset: "ts-jest",
+const config = {
+  preset: "ts-jest/presets/default-esm",
   testEnvironment: "node",
   testMatch: ["**/tests/integration/**/*.test.ts"],
   setupFilesAfterEnv: ["<rootDir>/tests/integration/setup.ts"],
+  extensionsToTreatAsEsm: [".ts"],
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/src/$1",
   },
   transform: {
-    "^.+\\.ts$": [
+    "^.+\\.tsx?$": [
       "ts-jest",
       {
+        useESM: true,
         tsconfig: "tsconfig.json",
       },
     ],
@@ -21,3 +23,5 @@ module.exports = {
   maxConcurrency: 1,
   maxWorkers: 1,
 };
+
+export default config;

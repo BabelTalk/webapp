@@ -33,9 +33,6 @@ const configSchema = z.object({
   E2E_ENABLED: z.string().transform((val: string) => val === "true"),
   ENCRYPTION_KEY: z.string().optional(),
 });
-
-console.log("TESTING CONFIG:", configSchema.parse(process.env));
-
 export function loadConfig(): QuasiPeerConfig {
   const env = configSchema.parse(process.env);
 
