@@ -69,6 +69,15 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useQuasiPeer } from "@/hooks/useQuasiPeer";
+import { TranscriptionPanel } from "@/components/meeting/TranscriptionPanel";
+import { TranslationPanel } from "@/components/meeting/TranslationPanel";
+import type { TranscriptionResult, TranslationResult } from "@/types/quasiPeer";
+import { useMediaDevices } from "@/hooks/useMediaDevices";
+import { useAudioProcessing } from "@/hooks/useAudioProcessing";
+import { useWebSocketConnection } from "@/hooks/useWebSocketConnection";
+import { toast } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 
 interface PeerData {
   peer: Peer.Instance;
@@ -96,7 +105,7 @@ interface SettingsState {
 type LayoutType = "speaker" | "grid" | "sidebar";
 
 // Add this type for sidebar content
-type SidebarContent = "chat" | "participants" | null;
+type SidebarContent = "chat" | "participants" | "ai" | null;
 
 // Add this interface near the top of the file with other interfaces
 interface User {
@@ -124,6 +133,56 @@ function UserAvatar({ name }: { name: string }) {
   );
 }
 
+// Add type for audio cleanup
+type AudioCleanupFn = () => void;
+
+// Add ref types
+interface TranscriptionPanelRef {
+  addTranscription: (result: TranscriptionResult) => void;
+  getTranscripts: () => TranscriptionResult[];
+}
+
+interface TranslationPanelRef {
+  addTranslation: (result: TranslationResult) => void;
+}
+
+// Add types for new features
+interface SentimentAnalysis {
+  score: number; // -1 to 1
+  label: "negative" | "neutral" | "positive";
+  timestamp: number;
+}
+
+interface SpeakerSegment {
+  speakerId: string;
+  speakerName: string;
+  text: string;
+  startTime: number;
+  endTime: number;
+  sentiment?: SentimentAnalysis;
+}
+
+interface MeetingAnalytics {
+  duration: number;
+  participantCount: number;
+  speakingTime: { [participantId: string]: number };
+  sentimentTrend: SentimentAnalysis[];
+  participantEngagement: {
+    [participantId: string]: {
+      speakingTime: number;
+      messageCount: number;
+      reactionCount: number;
+      attentiveness: number; // 0 to 1
+    };
+  };
+  topics: {
+    name: string;
+    duration: number;
+    sentiment: SentimentAnalysis;
+    participants: string[];
+  }[];
+}
+
 export default function Meeting({
   params,
 }: {
@@ -133,18 +192,12 @@ export default function Meeting({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [peers, setPeers] = useState<PeerData[]>([]);
-  const [stream, setStream] = useState<MediaStream | null>(null);
-  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
-  const [isMicOn, setIsMicOn] = useState(true);
-  const [isCameraOn, setIsCameraOn] = useState(true);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [showCopyToast, setShowCopyToast] = useState(false);
   const [showNewMeetingModal, setShowNewMeetingModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [currentLayout, setCurrentLayout] = useState<LayoutType>("speaker");
-  const [mediaError, setMediaError] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsState>({
     video: {
       sendResolution: "720p",
@@ -161,52 +214,307 @@ export default function Meeting({
     },
   });
 
-  // Add state for available resolutions
-  const [availableResolutions, setAvailableResolutions] = useState<string[]>(
-    []
-  );
+  // Add state for meeting summary and analytics
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [meetingSummary, setMeetingSummary] = useState<{
+    topics: string[];
+    keyPoints: string[];
+    actionItems: string[];
+  } | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const [sentimentAnalysis, setSentimentAnalysis] = useState<
+    SentimentAnalysis[]
+  >([]);
+  const [speakerSegments, setSpeakerSegments] = useState<SpeakerSegment[]>([]);
+  const [meetingAnalytics, setMeetingAnalytics] =
+    useState<MeetingAnalytics | null>(null);
+  const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
+  const [meetingStartTime] = useState<number>(Date.now());
 
-  // Add mobile detection
-  const [isMobile, setIsMobile] = useState(false);
-
-  // Add separate permission states
-  const [cameraPermission, setCameraPermission] =
-    useState<PermissionState | null>(null);
-  const [micPermission, setMicPermission] = useState<PermissionState | null>(
-    null
-  );
-
-  const socketRef = useRef<Socket | null>(null);
+  // Add refs
+  const transcriptionPanelRef = useRef<TranscriptionPanelRef>(null);
+  const translationPanelRef = useRef<TranslationPanelRef>(null);
   const userVideoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const peersRef = useRef<
     { peerID: string; peer: Peer.Instance; userName: string }[]
   >([]);
 
-  const [showParticipantsDrawer, setShowParticipantsDrawer] = useState(false);
-  const [showChatSidebar, setShowChatSidebar] = useState(false);
-
+  // Add mobile detection and permissions
+  const [isMobile, setIsMobile] = useState(false);
+  const [cameraPermission, setCameraPermission] =
+    useState<PermissionState | null>(null);
+  const [micPermission, setMicPermission] = useState<PermissionState | null>(
+    null
+  );
   const [sidebarContent, setSidebarContent] = useState<SidebarContent>(null);
   const [isHost, setIsHost] = useState(false);
 
-  // Move getMediaConstraints before the useEffect hooks
-  const getMediaConstraints = useCallback(() => {
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        echoCancellation: settings.audio.echoCancellation,
-        noiseSuppression: settings.audio.noiseSuppression,
+  // Use mediaDevices hook with renamed functions to avoid conflicts
+  const {
+    stream,
+    screenStream,
+    mediaState: { isMicOn, isCameraOn, isScreenSharing },
+    mediaError,
+    initializeMedia,
+    toggleMic,
+    toggleCamera,
+    switchCamera: handleSwitchCamera,
+    toggleScreenShare: handleToggleScreenShare,
+    stopScreenSharing: handleStopScreenShare,
+    cleanupMediaStream,
+    setMediaError,
+  } = useMediaDevices(settings);
+
+  const [availableResolutions, setAvailableResolutions] = useState<string[]>(
+    []
+  );
+  const socketRef = useRef<Socket | null>(null);
+  const MAX_RECONNECTION_ATTEMPTS = 3;
+
+  // Handler functions
+  const handleTranscriptionResult = useCallback(
+    (result: TranscriptionResult) => {
+      transcriptionPanelRef.current?.addTranscription(result);
+    },
+    []
+  );
+
+  const handleSpeakerIdentified = useCallback(
+    (speakerId: string, speakerName: string) => {
+      setCurrentSpeaker(speakerName);
+    },
+    []
+  );
+
+  const handleSentimentAnalyzed = useCallback(
+    (sentiment: { score: number; label: string }) => {
+      setSentimentAnalysis((prev: SentimentAnalysis[]) => [
+        ...prev,
+        {
+          score: sentiment.score,
+          label: sentiment.label as "negative" | "neutral" | "positive",
+          timestamp: Date.now(),
+        },
+      ]);
+    },
+    []
+  );
+
+  const handleParticipantJoined = useCallback((participant: any) => {
+    console.log("New participant joined:", participant);
+  }, []);
+
+  const handleParticipantLeft = useCallback((participantId: string) => {
+    console.log("Participant left:", participantId);
+  }, []);
+
+  const handlePeerError = useCallback(
+    (error: Error) => {
+      console.error("Peer connection error:", error);
+      setMediaError("Peer connection error. Please try reconnecting.");
+    },
+    [setMediaError]
+  );
+
+  const handleConnectionError = useCallback(
+    (error: Error) => {
+      console.error("Connection error:", error);
+      setMediaError("Connection error. Please try reconnecting.");
+    },
+    [setMediaError]
+  );
+
+  const { isProcessing, startProcessing, stopProcessing } = useAudioProcessing({
+    onTranscriptionResult: handleTranscriptionResult,
+    onSpeakerIdentified: handleSpeakerIdentified,
+    meetingId: params.meetingCode,
+    userName: user?.name || "Anonymous",
+    preferredLanguage: "en",
+  });
+
+  const {
+    socket,
+    isConnected,
+    isReconnecting,
+    reconnectionAttempts,
+    connect: connectSocket,
+    disconnect: disconnectSocket,
+  } = useWebSocketConnection({
+    url: process.env.NEXT_PUBLIC_QUASI_PEER_URL || "",
+    roomId: params.meetingCode,
+    userName: user?.name || "Anonymous",
+    onParticipantJoined: handleParticipantJoined,
+    onParticipantLeft: handleParticipantLeft,
+    onPeerError: handlePeerError,
+    onConnectionError: handleConnectionError,
+  });
+
+  // Add missing functions
+  const getMediaConstraints = () => ({
+    video: {
+      width:
+        settings.video.sendResolution === "1080p"
+          ? 1920
+          : settings.video.sendResolution === "720p"
+          ? 1280
+          : 854,
+      height:
+        settings.video.sendResolution === "1080p"
+          ? 1080
+          : settings.video.sendResolution === "720p"
+          ? 720
+          : 480,
+      frameRate: settings.video.frameRate,
+    },
+    audio: {
+      noiseSuppression: settings.audio.noiseSuppression,
+      echoCancellation: settings.audio.echoCancellation,
+    },
+  });
+
+  const requestTranslation = async (text: string, targetLanguage: string) => {
+    try {
+      const response = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, targetLanguage }),
+      });
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error("Translation error:", error);
+      return null;
+    }
+  };
+
+  // Update toggleMicState function
+  const toggleMicState = () => {
+    if (stream) {
+      stream.getAudioTracks().forEach((track) => (track.enabled = !isMicOn));
+      toggleMic();
+    }
+  };
+
+  // Update toggleCameraState function
+  const toggleCameraState = () => {
+    if (stream) {
+      stream.getVideoTracks().forEach((track) => (track.enabled = !isCameraOn));
+      toggleCamera();
+    }
+  };
+
+  // Update leaveMeeting function
+  const leaveMeeting = () => {
+    socket?.disconnect();
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    router.push("/");
+  };
+
+  // Update createPeer function
+  function createPeer(
+    userToSignal: string,
+    callerID: string,
+    stream: MediaStream
+  ) {
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+        ],
       },
-      video: {
-        facingMode: "user", // Default to front camera
-        width: isMobile
-          ? { ideal: 640, max: 1280 }
-          : { ideal: 1280, max: 1920 },
-        height: isMobile ? { ideal: 480, max: 720 } : { ideal: 720, max: 1080 },
-        frameRate: { max: settings.video.frameRate },
+    });
+
+    peer.on("signal", (signal) => {
+      socket?.emit("sending signal", {
+        userToSignal,
+        callerID,
+        signal,
+        userName: user?.name || "Anonymous",
+      });
+    });
+
+    return peer;
+  }
+
+  // Update addPeer function
+  function addPeer(
+    incomingSignal: Peer.SignalData,
+    callerID: string,
+    stream: MediaStream
+  ) {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+        ],
       },
-    };
-    return constraints;
-  }, [isMobile, settings.audio, settings.video.frameRate]);
+    });
+
+    peer.on("signal", (signal) => {
+      socket?.emit("returning signal", { signal, callerID });
+    });
+
+    peer.signal(incomingSignal);
+
+    return peer;
+  }
+
+  // Add function to get video layout class
+  const getVideoLayout = useCallback(() => {
+    if (peers.length === 0) return "w-full h-full";
+    if (currentLayout === "grid") {
+      return cn(
+        "w-full h-full grid gap-2",
+        peers.length === 1 && "grid-cols-1",
+        peers.length === 2 && "grid-cols-2",
+        peers.length > 2 && "grid-cols-3 grid-rows-2"
+      );
+    }
+    return "w-1/4 h-1/4 absolute bottom-4 right-4";
+  }, [peers.length, currentLayout]);
+
+  // Add function to handle host actions
+  const handleHostAction = useCallback(
+    (action: string, userId: string) => {
+      if (!isHost || !socket) return;
+      socket.emit("host-action", { action, userId });
+    },
+    [isHost, socket]
+  );
+
+  // Add function to handle transcription toggle
+  const handleToggleTranscription = useCallback(async () => {
+    if (!stream) return;
+
+    if (!isTranscribing) {
+      await startProcessing(stream);
+      setIsTranscribing(true);
+    } else {
+      stopProcessing();
+      setIsTranscribing(false);
+    }
+  }, [stream, isTranscribing, startProcessing, stopProcessing]);
+
+  // Add function to retry media access
+  const retryMediaAccess = useCallback(async () => {
+    setMediaError(null);
+    const success = await initializeMedia();
+    if (success) {
+      setMediaError(null);
+    }
+  }, [initializeMedia, setMediaError]);
 
   useEffect(() => {
     if (!user && !isLoading) {
@@ -294,204 +602,68 @@ export default function Meeting({
   // Update the main useEffect to handle permissions better
   useEffect(() => {
     if (user) {
-      const initializeMedia = async () => {
+      const initializeConnection = async () => {
         try {
-          // Check permissions first
-          const permissionsGranted = await checkAndRequestPermissions();
-          if (!permissionsGranted) {
+          // Initialize media devices
+          const mediaStream = await initializeMedia();
+          if (!mediaStream) {
+            setMediaError("Failed to initialize media devices");
             return;
           }
 
-          // Get the media stream with the proper constraints
-          const mediaStream = await navigator.mediaDevices
-            .getUserMedia(getMediaConstraints())
-            .catch((error) => {
-              if (error instanceof DOMException) {
-                if (error.name === "NotAllowedError") {
-                  if (!cameraPermission) {
-                    setMediaError(
-                      "Camera permission is required. Please grant access and reload."
-                    );
-                  } else if (!micPermission) {
-                    setMediaError(
-                      "Microphone permission is required. Please grant access and reload."
-                    );
-                  }
-                } else if (error.name === "NotReadableError") {
-                  setMediaError(
-                    "Cannot access your camera or microphone. They might be in use by another application."
-                  );
-                } else {
-                  setMediaError(
-                    `Error accessing media devices: ${error.message}`
-                  );
-                }
-              }
-              throw error;
-            });
-
-          if (!mediaStream) return;
-
-          // Set the stream and update video element
-          setStream(mediaStream);
+          // Update video element
           if (userVideoRef.current) {
             userVideoRef.current.srcObject = mediaStream;
             await userVideoRef.current.play().catch(console.error);
           }
 
-          // Initialize socket connection
-          socketRef.current = io(
-            process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL || "",
-            {
-              transports: ["websocket", "polling"],
+          // Connect to socket
+          await connectSocket();
+
+          // Join room
+          if (socket) {
+            socket.emit("join room", {
+              roomID: params.meetingCode,
+              userName: user.name || "Anonymous",
+              isMuted: !isMicOn,
+              isCameraOff: !isCameraOn,
+            });
+          }
+
+          return () => {
+            // Cleanup
+            cleanupMediaStream(mediaStream);
+            if (screenStream) {
+              cleanupMediaStream(screenStream);
             }
-          );
-
-          // Join the room
-          socketRef.current.emit("join room", {
-            roomID: params.meetingCode,
-            userName: user.name || "Anonymous",
-            isMuted: !isMicOn,
-            isCameraOff: !isCameraOn,
-          });
-
-          // Socket event handlers
-          socketRef.current.on("all users", (users: User[]) => {
-            const socketId = socketRef.current?.id;
-            if (!socketId) {
-              console.error("Socket ID not available");
-              return;
-            }
-
-            const currentUser = users.find((u: User) => u.id === socketId);
-            setIsHost(currentUser?.isHost || false);
-
-            const peers: PeerData[] = [];
-            users.forEach(
-              ({ id: userID, userName, isMuted, isCameraOff }: User) => {
-                if (userID !== socketId) {
-                  const peer = createPeer(userID, socketId, mediaStream);
-                  peersRef.current.push({
-                    peerID: userID,
-                    peer,
-                    userName,
-                  });
-                  peers.push({ peer, userName, isMuted, isCameraOff });
-                }
-              }
-            );
-            setPeers(peers);
-          });
-
-          socketRef.current.on(
-            "user joined",
-            (payload: {
-              signal: Peer.SignalData;
-              callerID: string;
-              userName: string;
-            }) => {
-              const peer = addPeer(
-                payload.signal,
-                payload.callerID,
-                mediaStream
-              );
-              peersRef.current.push({
-                peerID: payload.callerID,
-                peer,
-                userName: payload.userName,
-              });
-              setPeers((peers) => [
-                ...peers,
-                {
-                  peer,
-                  userName: payload.userName,
-                  isMuted: false,
-                  isCameraOff: false,
-                },
-              ]);
-            }
-          );
-
-          socketRef.current.on(
-            "receiving returned signal",
-            (payload: { id: string; signal: Peer.SignalData }) => {
-              const item = peersRef.current.find(
-                (p) => p.peerID === payload.id
-              );
-              item?.peer.signal(payload.signal);
-            }
-          );
-
-          socketRef.current.on("user left", (id: string) => {
-            const peerObj = peersRef.current.find((p) => p.peerID === id);
-            if (peerObj) {
-              peerObj.peer.destroy();
-            }
-            const peers = peersRef.current.filter((p) => p.peerID !== id);
-            peersRef.current = peers;
-            setPeers(
-              peers.map(({ peer, userName }) => ({
-                peer,
-                userName,
-                isMuted: false,
-                isCameraOff: false,
-              }))
-            );
-          });
-
-          socketRef.current.on("peer_mute_status", ({ peerId, isMuted }) => {
-            updatePeerMuteStatus(peerId, isMuted);
-          });
-
-          socketRef.current.on(
-            "peer_camera_status",
-            ({ peerId, isCameraOff }) => {
-              setPeers((currentPeers) =>
-                currentPeers.map((peer) => {
-                  const peerRef = peersRef.current.find(
-                    (p) => p.peerID === peerId
-                  );
-                  if (peerRef?.peer === peer.peer) {
-                    // Update the camera status without recreating the peer object
-                    return { ...peer, isCameraOff };
-                  }
-                  return peer;
-                })
-              );
-            }
-          );
-
-          // Handle host status changes
-          socketRef.current.on("host_changed", ({ newHostId }) => {
-            setIsHost(socketRef.current?.id === newHostId);
-          });
-        } catch (err) {
-          console.error("Error in initializeMedia:", err);
+            disconnectSocket();
+          };
+        } catch (error) {
+          console.error("Error initializing connection:", error);
+          setMediaError("Failed to initialize connection");
         }
       };
 
       if (navigator.mediaDevices) {
-        initializeMedia();
+        initializeConnection();
       } else {
         setMediaError(
           "Your browser doesn't support media devices. Please try using a different browser."
         );
       }
-
-      return () => {
-        socketRef.current?.disconnect();
-        if (stream) {
-          stream.getTracks().forEach((track) => track.stop());
-        }
-      };
     }
   }, [
     user,
     params.meetingCode,
-    getMediaConstraints,
     isMicOn,
     isCameraOn,
-    isMobile,
+    initializeMedia,
+    connectSocket,
+    disconnectSocket,
+    socket,
+    cleanupMediaStream,
+    screenStream,
+    setMediaError,
   ]);
 
   useEffect(() => {
@@ -500,205 +672,82 @@ export default function Meeting({
     }
   }, [searchParams]);
 
-  function createPeer(
-    userToSignal: string,
-    callerID: string,
-    stream: MediaStream
-  ) {
-    const peer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" },
-        ],
-      },
-    });
+  // Update switchCamera function
+  const switchCamera = async () => {
+    if (!stream) return;
 
-    peer.on("signal", (signal) => {
-      socketRef.current?.emit("sending signal", {
-        userToSignal,
-        callerID,
-        signal,
-        userName: user?.name || "Anonymous",
+    try {
+      // Stop and cleanup old video tracks
+      const oldVideoTracks = stream.getVideoTracks();
+      oldVideoTracks.forEach((track) => {
+        track.stop();
+        stream.removeTrack(track);
       });
-    });
 
-    return peer;
-  }
+      // Get new stream with different camera
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        ...getMediaConstraints(),
+        video: {
+          ...(getMediaConstraints().video as MediaTrackConstraints),
+          facingMode: isBackCamera ? "user" : "environment",
+        },
+      });
 
-  function addPeer(
-    incomingSignal: Peer.SignalData,
-    callerID: string,
-    stream: MediaStream
-  ) {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" },
-        ],
-      },
-    });
+      // Keep the existing audio track
+      const audioTrack = stream.getAudioTracks()[0];
+      const newVideoTrack = newStream.getVideoTracks()[0];
 
-    peer.on("signal", (signal) => {
-      socketRef.current?.emit("returning signal", { signal, callerID });
-    });
+      // Stop tracks from the temporary new stream
+      newStream.getAudioTracks().forEach((track) => {
+        track.stop();
+        newStream.removeTrack(track);
+      });
 
-    peer.signal(incomingSignal);
+      // Add the new video track to the existing stream
+      stream.addTrack(newVideoTrack);
 
-    return peer;
-  }
+      // Update local video
+      if (userVideoRef.current) {
+        userVideoRef.current.srcObject = stream;
+      }
 
-  const toggleMic = () => {
-    if (stream) {
-      stream.getAudioTracks().forEach((track) => (track.enabled = !isMicOn));
-      setIsMicOn(!isMicOn);
-      socketRef.current?.emit("mute_status", { isMuted: isMicOn });
-    }
-  };
+      setIsBackCamera(!isBackCamera);
 
-  const toggleCamera = () => {
-    if (stream) {
-      stream.getVideoTracks().forEach((track) => (track.enabled = !isCameraOn));
-      setIsCameraOn(!isCameraOn);
-      socketRef.current?.emit("camera_status", { isCameraOff: !isCameraOn });
-    }
-  };
-
-  const leaveMeeting = () => {
-    socketRef.current?.disconnect();
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-    }
-    router.push("/");
-  };
-
-  const copyMeetingLink = () => {
-    const meetingLink = `${window.location.origin}/pre-join/${params.meetingCode}`;
-    navigator.clipboard.writeText(meetingLink);
-    setShowCopyToast(true);
-    setTimeout(() => setShowCopyToast(false), 2000);
-  };
-
-  const toggleScreenShare = async () => {
-    try {
-      if (!isScreenSharing) {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: settings.audio.noiseSuppression,
-        });
-
-        // Replace video track in all peer connections
-        peersRef.current.forEach(({ peer }) => {
-          const videoTrack = screenStream.getVideoTracks()[0];
-          const videoSender = (peer as any)._pc
-            .getSenders()
-            .find((sender: RTCRtpSender) => sender.track?.kind === "video");
-          if (videoSender) {
-            videoSender.replaceTrack(videoTrack);
-          }
-        });
-
-        // Update local video display
-        if (userVideoRef.current) {
-          userVideoRef.current.srcObject = screenStream;
-        }
-
-        screenStream.getVideoTracks()[0].onended = () => {
-          stopScreenSharing();
-        };
-
-        setScreenStream(screenStream);
-        setIsScreenSharing(true);
-      } else {
-        stopScreenSharing();
+      // Update QuasiPeer connection
+      const videoProducer = producersRef.current?.get("video");
+      if (videoProducer) {
+        await videoProducer.replaceTrack({ track: newVideoTrack });
       }
     } catch (error) {
-      console.error("Error sharing screen:", error);
-      setMediaError("Error sharing screen. Please try again.");
+      console.error("Error switching camera:", error);
+      setMediaError("Failed to switch camera. Please try again.");
     }
   };
 
-  const stopScreenSharing = () => {
-    if (screenStream) {
-      screenStream.getTracks().forEach((track) => track.stop());
+  // Add missing state variables
+  const [isBackCamera, setIsBackCamera] = useState(false);
+  const [originalVideoTrack, setOriginalVideoTrack] =
+    useState<MediaStreamTrack | null>(null);
+  const producersRef = useRef<Map<string, any>>(new Map());
 
-      if (stream) {
-        // Revert to camera video track
-        peersRef.current.forEach(({ peer }) => {
-          const videoTrack = stream.getVideoTracks()[0];
-          const videoSender = (peer as any)._pc
-            .getSenders()
-            .find((sender: RTCRtpSender) => sender.track?.kind === "video");
-          if (videoSender) {
-            videoSender.replaceTrack(videoTrack);
-          }
-        });
+  // Add missing audio state variables
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [audioProcessor, setAudioProcessor] =
+    useState<ScriptProcessorNode | null>(null);
 
-        // Update local video display
-        if (userVideoRef.current) {
-          userVideoRef.current.srcObject = stream;
-        }
-      }
-
-      setScreenStream(null);
-      setIsScreenSharing(false);
-    }
-  };
-
-  const togglePictureInPicture = async () => {
+  // Add copyMeetingLink function
+  const copyMeetingLink = useCallback(async () => {
+    const meetingUrl = `${window.location.origin}/meeting/${params.meetingCode}`;
     try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-        setIsPictureInPicture(false);
-      } else if (userVideoRef.current) {
-        await userVideoRef.current.requestPictureInPicture();
-        setIsPictureInPicture(true);
-      }
+      await navigator.clipboard.writeText(meetingUrl);
+      toast.success("Meeting link copied to clipboard");
     } catch (error) {
-      console.error("Error toggling picture in picture:", error);
+      console.error("Failed to copy meeting link:", error);
+      toast.error("Failed to copy meeting link");
     }
-  };
+  }, [params.meetingCode]);
 
-  const toggleFullScreen = async () => {
-    try {
-      if (!document.fullscreenElement && containerRef.current) {
-        await containerRef.current.requestFullscreen();
-        setIsFullScreen(true);
-      } else if (document.fullscreenElement) {
-        await document.exitFullscreen();
-        setIsFullScreen(false);
-      }
-    } catch (error) {
-      console.error("Error toggling full screen:", error);
-    }
-  };
-
-  const updatePeerMuteStatus = (peerId: string, isMuted: boolean) => {
-    setPeers((currentPeers) =>
-      currentPeers.map((peer) => {
-        const peerRef = peersRef.current.find((p) => p.peerID === peerId);
-        return peerRef?.peer === peer.peer ? { ...peer, isMuted } : peer;
-      })
-    );
-  };
-
-  const updatePeerCameraStatus = (peerId: string, isCameraOff: boolean) => {
-    setPeers((currentPeers) =>
-      currentPeers.map((peer) => {
-        const peerRef = peersRef.current.find((p) => p.peerID === peerId);
-        return peerRef?.peer === peer.peer ? { ...peer, isCameraOff } : peer;
-      })
-    );
-  };
-
-  // Function to detect supported resolutions
+  // Add function to detect supported resolutions
   const detectSupportedResolutions = async () => {
     const resolutions = [
       { width: 1920, height: 1080, label: "1080p" },
@@ -817,100 +866,141 @@ export default function Meeting({
       containerRef.current.requestFullscreen().catch(console.error);
     }
     if (settings.general.muteOnJoin) {
-      setIsMicOn(false);
+      toggleMic();
       if (stream) {
         stream.getAudioTracks().forEach((track) => (track.enabled = false));
       }
     }
   }, []);
 
-  // Add camera switch function for mobile
-  const [isBackCamera, setIsBackCamera] = useState(false);
-  const switchCamera = async () => {
-    if (!stream) return;
+  // Add device change handling
+  useEffect(() => {
+    const handleDeviceChange = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const hasVideo = devices.some((device) => device.kind === "videoinput");
+        const hasAudio = devices.some((device) => device.kind === "audioinput");
 
-    try {
-      // Stop all video tracks
-      stream.getVideoTracks().forEach((track) => track.stop());
-
-      // Get new stream with different camera
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        ...getMediaConstraints(),
-        video: {
-          ...(getMediaConstraints().video as MediaTrackConstraints),
-          facingMode: isBackCamera ? "user" : "environment",
-        },
-      });
-
-      // Replace video track in all peer connections
-      const newVideoTrack = newStream.getVideoTracks()[0];
-      peersRef.current.forEach(({ peer }) => {
-        const videoSender = (peer as any)._pc
-          .getSenders()
-          .find((sender: RTCRtpSender) => sender.track?.kind === "video");
-        if (videoSender) {
-          videoSender.replaceTrack(newVideoTrack);
+        if (!hasVideo && isCameraOn) {
+          toggleCamera();
+          setMediaError("Video device disconnected");
         }
-      });
-
-      // Update local stream and video
-      const audioTrack = stream.getAudioTracks()[0];
-      setStream(new MediaStream([newVideoTrack, audioTrack]));
-      if (userVideoRef.current) {
-        userVideoRef.current.srcObject = new MediaStream([
-          newVideoTrack,
-          audioTrack,
-        ]);
+        if (!hasAudio && isMicOn) {
+          toggleMic();
+          setMediaError("Audio device disconnected");
+        }
+      } catch (error) {
+        console.error("Error handling device change:", error);
       }
+    };
 
-      setIsBackCamera(!isBackCamera);
-    } catch (error) {
-      console.error("Error switching camera:", error);
-      setMediaError("Failed to switch camera. Please try again.");
-    }
-  };
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange
+      );
+    };
+  }, [isMicOn, isCameraOn]);
 
-  // Update the retry function to be more specific
-  const retryMediaAccess = async () => {
-    setMediaError(null);
-    setCameraPermission(null);
-    setMicPermission(null);
-
+  // Update cleanup in main useEffect
+  useEffect(() => {
     if (user) {
-      // First try to get permissions
-      const permissionsGranted = await checkAndRequestPermissions();
-      if (permissionsGranted) {
-        // If on mobile, we need a full page reload
-        if (isMobile) {
-          window.location.reload();
-        } else {
-          // On desktop, we can try to reinitialize without reload
-          try {
-            const mediaStream = await navigator.mediaDevices.getUserMedia(
-              getMediaConstraints()
-            );
-            setStream(mediaStream);
-            if (userVideoRef.current) {
-              userVideoRef.current.srcObject = mediaStream;
-            }
-          } catch (error) {
-            console.error("Error retrying media access:", error);
-            setMediaError("Failed to access devices. Please reload the page.");
+      const initializeConnection = async () => {
+        try {
+          // Initialize media devices
+          const mediaStream = await initializeMedia();
+          if (!mediaStream) {
+            setMediaError("Failed to initialize media devices");
+            return;
           }
+
+          // Update video element
+          if (userVideoRef.current) {
+            userVideoRef.current.srcObject = mediaStream;
+            await userVideoRef.current.play().catch(console.error);
+          }
+
+          // Connect to socket
+          await connectSocket();
+
+          // Join room
+          if (socket) {
+            socket.emit("join room", {
+              roomID: params.meetingCode,
+              userName: user.name || "Anonymous",
+              isMuted: !isMicOn,
+              isCameraOff: !isCameraOn,
+            });
+          }
+
+          return () => {
+            // Cleanup
+            cleanupMediaStream(mediaStream);
+            if (screenStream) {
+              cleanupMediaStream(screenStream);
+            }
+            disconnectSocket();
+          };
+        } catch (error) {
+          console.error("Error initializing connection:", error);
+          setMediaError("Failed to initialize connection");
         }
+      };
+
+      if (navigator.mediaDevices) {
+        initializeConnection();
+      } else {
+        setMediaError(
+          "Your browser doesn't support media devices. Please try using a different browser."
+        );
       }
+    }
+  }, [
+    user,
+    params.meetingCode,
+    isMicOn,
+    isCameraOn,
+    initializeMedia,
+    connectSocket,
+    disconnectSocket,
+    socket,
+    cleanupMediaStream,
+    screenStream,
+    setMediaError,
+  ]);
+
+  // Add picture-in-picture and fullscreen functions
+  const togglePictureInPicture = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPictureInPicture(false);
+      } else if (userVideoRef.current) {
+        await userVideoRef.current.requestPictureInPicture();
+        setIsPictureInPicture(true);
+      }
+    } catch (error) {
+      console.error("Picture-in-Picture error:", error);
+      setMediaError(
+        "Picture-in-Picture mode is not supported in your browser."
+      );
     }
   };
 
-  // Update host action handlers
-  const handleHostAction = (action: string, targetId: string) => {
-    if (!isHost || !socketRef.current) return;
-
-    socketRef.current.emit("host_action", {
-      roomId: params.meetingCode,
-      action,
-      targetId,
-    });
+  const toggleFullScreen = async () => {
+    try {
+      if (!document.fullscreenElement && containerRef.current) {
+        await containerRef.current.requestFullscreen();
+        setIsFullScreen(true);
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        setIsFullScreen(false);
+      }
+    } catch (error) {
+      console.error("Fullscreen error:", error);
+      setMediaError("Fullscreen mode is not supported in your browser.");
+    }
   };
 
   if (isLoading) {
@@ -921,25 +1011,9 @@ export default function Meeting({
     return null;
   }
 
-  const getVideoLayout = () => {
-    const totalParticipants = peers.length + 1;
-
-    if (isScreenSharing) {
-      // When screen sharing, user's video should be small
-      return "w-1/4 h-1/4 bottom-4 right-4";
-    }
-
-    // For the current user's video
-    if (totalParticipants > 1) {
-      return "w-1/4 h-1/4 absolute bottom-4 right-4 z-10";
-    }
-
-    // When user is alone
-    return "w-full h-full";
-  };
-
   return (
     <TooltipProvider>
+      <Toaster />
       <div className="flex h-screen">
         {/* Main video area - 75% when sidebar is open */}
         <div
@@ -1012,7 +1086,11 @@ export default function Meeting({
               <div className="flex flex-wrap justify-center gap-2">
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" onClick={toggleMic}>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={toggleMicState}
+                    >
                       {isMicOn ? (
                         <Mic className="h-4 w-4" />
                       ) : (
@@ -1028,7 +1106,7 @@ export default function Meeting({
                     <Button
                       variant="outline"
                       size="icon"
-                      onClick={toggleCamera}
+                      onClick={toggleCameraState}
                     >
                       {isCameraOn ? (
                         <VideoIcon className="h-4 w-4" />
@@ -1063,7 +1141,7 @@ export default function Meeting({
                       <Button
                         variant="outline"
                         size="icon"
-                        onClick={toggleScreenShare}
+                        onClick={handleToggleScreenShare}
                       >
                         <ScreenShare
                           className={`h-4 w-4 ${
@@ -1186,9 +1264,6 @@ export default function Meeting({
                           <DropdownMenuRadioItem value="grid">
                             Grid View
                           </DropdownMenuRadioItem>
-                          <DropdownMenuRadioItem value="sidebar">
-                            Sidebar View
-                          </DropdownMenuRadioItem>
                         </DropdownMenuRadioGroup>
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
@@ -1202,7 +1277,7 @@ export default function Meeting({
         {/* Sidebar - 25% */}
         {sidebarContent && (
           <div className="w-1/4 border-l border-border h-screen bg-background">
-            {sidebarContent === "chat" ? (
+            {sidebarContent === "chat" && (
               <div className="flex flex-col h-full">
                 <div className="p-4 border-b">
                   <h2 className="text-lg font-semibold">Chat</h2>
@@ -1221,7 +1296,23 @@ export default function Meeting({
                   />
                 </div>
               </div>
-            ) : (
+            )}
+            {sidebarContent === "ai" && (
+              <div className="flex flex-col h-full">
+                <div className="p-4 border-b">
+                  <h2 className="text-lg font-semibold">Transcription</h2>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  <TranscriptionPanel
+                    isTranscribing={isTranscribing}
+                    onToggleTranscription={handleToggleTranscription}
+                    onRequestTranslation={requestTranslation}
+                    supportedLanguages={["en", "es", "fr", "de", "hi", "mr"]}
+                  />
+                </div>
+              </div>
+            )}
+            {sidebarContent === "participants" && (
               <div className="flex flex-col h-full">
                 <div className="p-4 border-b">
                   <h2 className="text-lg font-semibold">Participants</h2>
@@ -1543,6 +1634,100 @@ export default function Meeting({
             </Tabs>
           </DialogContent>
         </Dialog>
+
+        {/* Add Meeting Summary Modal */}
+        <Dialog open={showSummaryModal} onOpenChange={setShowSummaryModal}>
+          <DialogContent className="sm:max-w-[600px]">
+            <DialogHeader>
+              <DialogTitle>Meeting Summary</DialogTitle>
+              <DialogDescription>
+                Here&apos;s a summary of your meeting
+              </DialogDescription>
+            </DialogHeader>
+
+            {meetingSummary ? (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="font-semibold mb-2">Main Topics</h3>
+                  <ul className="list-disc pl-4">
+                    {meetingSummary.topics.map((topic, index) => (
+                      <li key={index}>{topic}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div>
+                  <h3 className="font-semibold mb-2">Key Points</h3>
+                  <ul className="list-disc pl-4">
+                    {meetingSummary.keyPoints.map((point, index) => (
+                      <li key={index}>{point}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div>
+                  <h3 className="font-semibold mb-2">Action Items</h3>
+                  <ul className="list-disc pl-4">
+                    {meetingSummary.actionItems.map((item, index) => (
+                      <li key={index}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="pt-4 flex justify-end space-x-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      const summary = {
+                        ...meetingSummary,
+                        meetingId: params.meetingCode,
+                        date: new Date().toISOString(),
+                      };
+
+                      // Download summary as JSON
+                      const blob = new Blob(
+                        [JSON.stringify(summary, null, 2)],
+                        {
+                          type: "application/json",
+                        }
+                      );
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `meeting-summary-${params.meetingCode}.json`;
+                      a.click();
+                    }}
+                  >
+                    Download Summary
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setShowSummaryModal(false);
+                      router.push("/");
+                    }}
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center p-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
+
+        {/* Add Reconnection Indicator */}
+        {isReconnecting && (
+          <div className="fixed top-4 right-4 bg-yellow-500 text-white px-4 py-2 rounded-md shadow-lg flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+            <span>
+              Reconnecting... Attempt {reconnectionAttempts}/
+              {MAX_RECONNECTION_ATTEMPTS}
+            </span>
+          </div>
+        )}
       </div>
     </TooltipProvider>
   );

@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import Redis from "ioredis";
-import "@types/jest";
+import "jest";
+import { beforeAll, afterAll, jest } from "@jest/globals";
 
 // Load test environment variables
 dotenv.config({ path: ".env.test" });

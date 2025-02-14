@@ -751,9 +751,9 @@ export class QuasiPeerServer {
       }
 
       // Close all transports
-      for (const transport of this.transportMap.values()) {
+      Array.from(this.transportMap.values()).forEach((transport) => {
         transport.close();
-      }
+      });
       this.transportMap.clear();
 
       // Close Redis connection

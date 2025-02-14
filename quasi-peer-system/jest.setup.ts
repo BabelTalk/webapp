@@ -1,3 +1,5 @@
+import "jest";
+import { jest, beforeAll, afterAll } from "@jest/globals";
 import dotenv from "dotenv";
 
 // Load environment variables
