@@ -28,6 +28,7 @@ import {
   MessageCircle,
   Paperclip,
   SendIcon,
+  ScrollText, // Add this import
 } from "lucide-react";
 import {
   Dialog,
@@ -79,14 +80,12 @@ import { useWebSocketConnection } from "@/hooks/useWebSocketConnection";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { MediaPlayer } from "../../../components/MediaPlayer";
-
 interface PeerData {
   peer: Peer.Instance;
   userName: string;
   isMuted: boolean;
   isCameraOff: boolean;
 }
-
 interface SettingsState {
   video: {
     sendResolution: string;
@@ -102,12 +101,9 @@ interface SettingsState {
     muteOnJoin: boolean;
   };
 }
-
 type LayoutType = "speaker" | "grid" | "sidebar";
-
 // Add this type for sidebar content
 type SidebarContent = "chat" | "participants" | "ai" | null;
-
 // Add this interface near the top of the file with other interfaces
 interface User {
   id: string;
@@ -116,7 +112,6 @@ interface User {
   isCameraOff: boolean;
   isHost?: boolean;
 }
-
 function UserAvatar({ name }: { name: string }) {
   const initials = name
     .split(" ")
@@ -124,7 +119,6 @@ function UserAvatar({ name }: { name: string }) {
     .slice(0, 2)
     .join("")
     .toUpperCase();
-
   return (
     <div className="w-full h-full flex items-center justify-center bg-gray-700">
       <div className="w-24 h-24 rounded-full bg-primary flex items-center justify-center text-3xl font-semibold text-primary-foreground">
@@ -133,27 +127,22 @@ function UserAvatar({ name }: { name: string }) {
     </div>
   );
 }
-
 // Add type for audio cleanup
 type AudioCleanupFn = () => void;
-
 // Add ref types
 interface TranscriptionPanelRef {
   addTranscription: (result: TranscriptionResult) => void;
   getTranscripts: () => TranscriptionResult[];
 }
-
 interface TranslationPanelRef {
   addTranslation: (result: TranslationResult) => void;
 }
-
 // Add types for new features
 interface SentimentAnalysis {
   score: number; // -1 to 1
   label: "negative" | "neutral" | "positive";
   timestamp: number;
 }
-
 interface SpeakerSegment {
   speakerId: string;
   speakerName: string;
@@ -162,7 +151,6 @@ interface SpeakerSegment {
   endTime: number;
   sentiment?: SentimentAnalysis;
 }
-
 interface MeetingAnalytics {
   duration: number;
   participantCount: number;
@@ -183,7 +171,6 @@ interface MeetingAnalytics {
     participants: string[];
   }[];
 }
-
 export default function Meeting({
   params,
 }: {
@@ -197,6 +184,8 @@ export default function Meeting({
   const [showNewMeetingModal, setShowNewMeetingModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
+  const [copyMeetingLink, setCopyMeetingLink] = useState();
+  const [switchCamera, setSwitchCamera] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [currentLayout, setCurrentLayout] = useState<LayoutType>("speaker");
   const [settings, setSettings] = useState<SettingsState>({
@@ -214,7 +203,6 @@ export default function Meeting({
       muteOnJoin: false,
     },
   });
-
   // Add state for meeting summary and analytics
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [meetingSummary, setMeetingSummary] = useState<{
@@ -232,7 +220,6 @@ export default function Meeting({
     useState<MeetingAnalytics | null>(null);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [meetingStartTime] = useState<number>(Date.now());
-
   // Add refs
   const transcriptionPanelRef = useRef<TranscriptionPanelRef>(null);
   const translationPanelRef = useRef<TranslationPanelRef>(null);
@@ -242,7 +229,6 @@ export default function Meeting({
     { peerID: string; peer: Peer.Instance; userName: string }[]
   >([]);
   const playAttemptRef = useRef<Promise<void> | null>(null);
-
   // Add mobile detection and permissions
   const [isMobile, setIsMobile] = useState(false);
   const [cameraPermission, setCameraPermission] =
@@ -252,7 +238,6 @@ export default function Meeting({
   );
   const [sidebarContent, setSidebarContent] = useState<SidebarContent>(null);
   const [isHost, setIsHost] = useState(false);
-
   // Use mediaDevices hook with renamed functions to avoid conflicts
   const {
     stream,
@@ -268,13 +253,11 @@ export default function Meeting({
     cleanupMediaStream,
     setMediaError,
   } = useMediaDevices(settings);
-
   const [availableResolutions, setAvailableResolutions] = useState<string[]>(
     []
   );
   const socketRef = useRef<Socket | null>(null);
   const MAX_RECONNECTION_ATTEMPTS = 3;
-
   // Handler functions
   const handleTranscriptionResult = useCallback(
     (result: TranscriptionResult) => {
@@ -282,14 +265,12 @@ export default function Meeting({
     },
     []
   );
-
   const handleSpeakerIdentified = useCallback(
     (speakerId: string, speakerName: string) => {
       setCurrentSpeaker(speakerName);
     },
     []
   );
-
   const handleSentimentAnalyzed = useCallback(
     (sentiment: { score: number; label: string }) => {
       setSentimentAnalysis((prev: SentimentAnalysis[]) => [
@@ -303,15 +284,12 @@ export default function Meeting({
     },
     []
   );
-
   const handleParticipantJoined = useCallback((participant: any) => {
     console.log("New participant joined:", participant);
   }, []);
-
   const handleParticipantLeft = useCallback((participantId: string) => {
     console.log("Participant left:", participantId);
   }, []);
-
   const handlePeerError = useCallback(
     (error: Error) => {
       console.error("Peer connection error:", error);
@@ -319,7 +297,6 @@ export default function Meeting({
     },
     [setMediaError]
   );
-
   const handleConnectionError = useCallback(
     (error: Error) => {
       console.error("Connection error:", error);
@@ -327,7 +304,6 @@ export default function Meeting({
     },
     [setMediaError]
   );
-
   const { isProcessing, startProcessing, stopProcessing } = useAudioProcessing({
     onTranscriptionResult: handleTranscriptionResult,
     onSpeakerIdentified: handleSpeakerIdentified,
@@ -335,7 +311,6 @@ export default function Meeting({
     userName: user?.name || "Anonymous",
     preferredLanguage: "en",
   });
-
   const {
     socket,
     isConnected,
@@ -344,7 +319,6 @@ export default function Meeting({
     connect: connectSocket,
     disconnect: disconnectSocket,
   } = useWebSocketConnection(process.env.NEXT_PUBLIC_QUASI_PEER_URL || "");
-
   // Add missing functions
   const getMediaConstraints = () => ({
     video: {
@@ -367,7 +341,6 @@ export default function Meeting({
       echoCancellation: settings.audio.echoCancellation,
     },
   });
-
   const requestTranslation = async (text: string, targetLanguage: string) => {
     try {
       const response = await fetch("/api/translate", {
@@ -382,7 +355,6 @@ export default function Meeting({
       return null;
     }
   };
-
   // Update toggleMicState function
   const toggleMicState = () => {
     if (stream) {
@@ -390,7 +362,6 @@ export default function Meeting({
       toggleMic();
     }
   };
-
   // Update toggleCameraState function
   const toggleCameraState = () => {
     if (stream) {
@@ -398,7 +369,6 @@ export default function Meeting({
       toggleCamera();
     }
   };
-
   // Update leaveMeeting function
   const leaveMeeting = () => {
     socket?.disconnect();
@@ -407,7 +377,6 @@ export default function Meeting({
     }
     router.push("/");
   };
-
   // Update createPeer function
   function createPeer(
     userToSignal: string,
@@ -425,7 +394,6 @@ export default function Meeting({
         ],
       },
     });
-
     peer.on("signal", (signal) => {
       socket?.emit("sending signal", {
         userToSignal,
@@ -434,10 +402,8 @@ export default function Meeting({
         userName: user?.name || "Anonymous",
       });
     });
-
     return peer;
   }
-
   // Update addPeer function
   function addPeer(
     incomingSignal: Peer.SignalData,
@@ -455,16 +421,12 @@ export default function Meeting({
         ],
       },
     });
-
     peer.on("signal", (signal) => {
       socket?.emit("returning signal", { signal, callerID });
     });
-
     peer.signal(incomingSignal);
-
     return peer;
   }
-
   // Add function to get video layout class
   const getVideoLayout = useCallback(() => {
     if (peers.length === 0) return "w-full h-full";
@@ -478,7 +440,6 @@ export default function Meeting({
     }
     return "w-1/4 h-1/4 absolute bottom-4 right-4";
   }, [peers.length, currentLayout]);
-
   // Add function to handle host actions
   const handleHostAction = useCallback(
     (action: string, userId: string) => {
@@ -487,19 +448,53 @@ export default function Meeting({
     },
     [isHost, socket]
   );
-
   // Add function to handle transcription toggle
   const handleToggleTranscription = useCallback(async () => {
-    if (!stream) return;
+    if (!stream) {
+      console.error("Cannot toggle transcription without a stream");
+      setMediaError("Microphone access is needed for transcription");
+      return;
+    }
+
+    console.log("Toggle transcription, current state:", isTranscribing);
 
     if (!isTranscribing) {
-      await startProcessing(stream);
-      setIsTranscribing(true);
+      try {
+        console.log("Starting audio processing for transcription");
+        const success = await startProcessing(stream);
+        if (success) {
+          console.log("Transcription started successfully");
+          setIsTranscribing(true);
+
+          // Make sure sidebar is open when starting transcription
+          if (sidebarContent !== "ai") {
+            setSidebarContent("ai");
+          }
+        } else {
+          console.error("Failed to start transcription");
+          setMediaError("Failed to start transcription. Please try again.");
+        }
+      } catch (error) {
+        console.error("Error starting transcription:", error);
+        setMediaError(
+          "Error starting transcription: " +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
     } else {
+      console.log("Stopping transcription");
       stopProcessing();
       setIsTranscribing(false);
     }
-  }, [stream, isTranscribing, startProcessing, stopProcessing]);
+  }, [
+    stream,
+    isTranscribing,
+    startProcessing,
+    stopProcessing,
+    sidebarContent,
+    setSidebarContent,
+    setMediaError,
+  ]);
 
   // Add function to retry media access
   const retryMediaAccess = useCallback(async () => {
@@ -510,13 +505,145 @@ export default function Meeting({
     }
   }, [initializeMedia, setMediaError]);
 
+  // Update the main useEffect to handle permissions better without repeatedly initializing media
   useEffect(() => {
-    if (!user && !isLoading) {
-      router.push("/");
-    }
-  }, [user, isLoading, router]);
+    if (user) {
+      const initializeConnection = async () => {
+        try {
+          // Initialize media devices
+          const mediaStream = await initializeMedia();
+          if (!mediaStream) {
+            setMediaError("Failed to initialize media devices");
+            return;
+          }
 
-  // Detect mobile device
+          // Connect to socket
+          await connectSocket();
+
+          // Join room
+          if (socket) {
+            socket.emit("join room", {
+              roomID: params.meetingCode,
+              userName: user.name || "Anonymous",
+              isMuted: !isMicOn,
+              isCameraOff: !isCameraOn,
+            });
+          }
+
+          return () => {
+            // Cleanup
+            cleanupMediaStream(mediaStream);
+            if (screenStream) {
+              cleanupMediaStream(screenStream);
+            }
+            disconnectSocket();
+          };
+        } catch (error) {
+          console.error("Error initializing connection:", error);
+          setMediaError("Failed to initialize connection");
+        }
+      };
+
+      if (navigator.mediaDevices) {
+        initializeConnection();
+      } else {
+        setMediaError(
+          "Your browser doesn't support media devices. Please try using a different browser."
+        );
+      }
+    }
+  }, [
+    user,
+    params.meetingCode,
+    connectSocket,
+    disconnectSocket,
+    socket,
+    cleanupMediaStream,
+    setMediaError,
+  ]);
+
+  // Add this effect to set up transcription when the stream is available
+  useEffect(() => {
+    if (stream && sidebarContent === "ai" && !isTranscribing && !isProcessing) {
+      console.log("Starting transcription automatically with stream");
+      handleToggleTranscription();
+    }
+  }, [
+    stream,
+    sidebarContent,
+    isTranscribing,
+    isProcessing,
+    handleToggleTranscription,
+  ]);
+
+  // Update the main useEffect to handle permissions better
+  useEffect(() => {
+    if (user) {
+      const initializeConnection = async () => {
+        try {
+          // Initialize media devices
+          const mediaStream = await initializeMedia();
+          if (!mediaStream) {
+            setMediaError("Failed to initialize media devices");
+            return;
+          }
+
+          // Update video element
+          if (userVideoRef.current && userVideoRef.current.paused) {
+            const playPromise = userVideoRef.current.play();
+            if (playPromise !== undefined) {
+              playPromise.catch((error) => {
+                console.error("Video play interrupted:", error);
+              });
+            }
+          }
+
+          // Connect to socket
+          await connectSocket();
+
+          // Join rooms
+          if (socket) {
+            socket.emit("join room", {
+              roomID: params.meetingCode,
+              userName: user.name || "Anonymous",
+              isMuted: !isMicOn,
+              isCameraOff: !isCameraOn,
+            });
+          }
+
+          return () => {
+            // Cleanup
+            cleanupMediaStream(mediaStream);
+            if (screenStream) {
+              cleanupMediaStream(screenStream);
+            }
+            disconnectSocket();
+          };
+        } catch (error) {
+          console.error("Error initializing connection:", error);
+          setMediaError("Failed to initialize connection");
+        }
+      };
+
+      if (navigator.mediaDevices) {
+        initializeConnection();
+      } else {
+        setMediaError(
+          "Your browser doesn't support media devices. Please try using a different browser."
+        );
+      }
+    }
+  }, [
+    user,
+    params.meetingCode,
+    connectSocket,
+    disconnectSocket,
+    socket,
+    cleanupMediaStream,
+    setMediaError,
+  ]);
+
+  // Detect mobile devices
   useEffect(() => {
     const checkMobile = () => {
       const userAgent = navigator.userAgent.toLowerCase();
@@ -618,7 +745,7 @@ export default function Meeting({
           // Connect to socket
           await connectSocket();
 
-          // Join room
+          // Join rooms
           if (socket) {
             socket.emit("join room", {
               roomID: params.meetingCode,
@@ -660,305 +787,33 @@ export default function Meeting({
     setMediaError,
   ]);
 
+  // Detect mobile devices
   useEffect(() => {
-    if (searchParams && searchParams.get("new") === "true") {
-      setShowNewMeetingModal(true);
-    }
-  }, [searchParams]);
-
-  // Update switchCamera function
-  const switchCamera = async () => {
-    if (!stream) return;
-
-    try {
-      // Stop and cleanup old video tracks
-      const oldVideoTracks = stream.getVideoTracks();
-      oldVideoTracks.forEach((track) => {
-        track.stop();
-        stream.removeTrack(track);
-      });
-
-      // Get new stream with different camera
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        ...getMediaConstraints(),
-        video: {
-          ...(getMediaConstraints().video as MediaTrackConstraints),
-          facingMode: isBackCamera ? "user" : "environment",
-        },
-      });
-
-      // Keep the existing audio track
-      const audioTrack = stream.getAudioTracks()[0];
-      const newVideoTrack = newStream.getVideoTracks()[0];
-
-      // Stop tracks from the temporary new stream
-      newStream.getAudioTracks().forEach((track) => {
-        track.stop();
-        newStream.removeTrack(track);
-      });
-
-      // Add the new video track to the existing stream
-      stream.addTrack(newVideoTrack);
-
-      // Update local video
-      if (userVideoRef.current) {
-        userVideoRef.current.srcObject = stream;
-      }
-
-      setIsBackCamera(!isBackCamera);
-
-      // Update QuasiPeer connection
-      const videoProducer = producersRef.current?.get("video");
-      if (videoProducer) {
-        await videoProducer.replaceTrack({ track: newVideoTrack });
-      }
-    } catch (error) {
-      console.error("Error switching camera:", error);
-      setMediaError("Failed to switch camera. Please try again.");
-    }
-  };
-
-  // Add missing state variables
-  const [isBackCamera, setIsBackCamera] = useState(false);
-  const [originalVideoTrack, setOriginalVideoTrack] =
-    useState<MediaStreamTrack | null>(null);
-  const producersRef = useRef<Map<string, any>>(new Map());
-
-  // Add missing audio state variables
-  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
-  const [audioProcessor, setAudioProcessor] =
-    useState<ScriptProcessorNode | null>(null);
-
-  // Add copyMeetingLink function
-  const copyMeetingLink = useCallback(async () => {
-    const meetingUrl = `${window.location.origin}/meeting/${params.meetingCode}`;
-    try {
-      await navigator.clipboard.writeText(meetingUrl);
-      toast.success("Meeting link copied to clipboard");
-    } catch (error) {
-      console.error("Failed to copy meeting link:", error);
-      toast.error("Failed to copy meeting link");
-    }
-  }, [params.meetingCode]);
-
-  // Add function to detect supported resolutions
-  const detectSupportedResolutions = async () => {
-    const resolutions = [
-      { width: 1920, height: 1080, label: "1080p" },
-      { width: 1280, height: 720, label: "720p" },
-      { width: 854, height: 480, label: "480p" },
-      { width: 640, height: 360, label: "360p" },
-    ] as const;
-
-    const supported: string[] = [];
-    for (const res of resolutions) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: res.width },
-            height: { ideal: res.height },
-          },
-        });
-        supported.push(res.label);
-        stream.getTracks().forEach((track) => track.stop());
-      } catch (e) {
-        console.log(`Resolution ${res.label} not supported`);
-      }
-    }
-
-    // Always include at least 360p if nothing else is supported
-    if (supported.length === 0) {
-      supported.push("360p");
-    }
-
-    setAvailableResolutions(supported);
-
-    // Set initial resolution to the highest available
-    if (supported.length > 0) {
-      setSettings((prev) => ({
-        ...prev,
-        video: {
-          ...prev.video,
-          sendResolution: supported[0],
-        },
-      }));
-    }
-  };
-
-  // Call detection on component mount
-  useEffect(() => {
-    detectSupportedResolutions();
-  }, []);
-
-  // Apply video settings
-  const applyVideoSettings = async () => {
-    if (stream) {
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        const constraints = {
-          width:
-            settings.video.sendResolution === "1080p"
-              ? 1920
-              : settings.video.sendResolution === "720p"
-              ? 1280
-              : 854,
-          height:
-            settings.video.sendResolution === "1080p"
-              ? 1080
-              : settings.video.sendResolution === "720p"
-              ? 720
-              : 480,
-          frameRate: settings.video.frameRate,
-        };
-
-        try {
-          await videoTrack.applyConstraints(constraints);
-        } catch (error) {
-          console.error("Error applying video constraints:", error);
-          setMediaError(
-            "Failed to apply video settings. Your device may not support these settings."
-          );
-        }
-      }
-    }
-  };
-
-  // Apply audio settings
-  const applyAudioSettings = async () => {
-    if (stream) {
-      const audioTrack = stream.getAudioTracks()[0];
-      if (audioTrack) {
-        const constraints = {
-          noiseSuppression: settings.audio.noiseSuppression,
-          echoCancellation: settings.audio.echoCancellation,
-        };
-
-        try {
-          await audioTrack.applyConstraints(constraints);
-        } catch (error) {
-          console.error("Error applying audio constraints:", error);
-          setMediaError(
-            "Failed to apply audio settings. Your device may not support these settings."
-          );
-        }
-      }
-    }
-  };
-
-  // Watch for settings changes
-  useEffect(() => {
-    applyVideoSettings();
-  }, [settings.video]);
-
-  useEffect(() => {
-    applyAudioSettings();
-  }, [settings.audio]);
-
-  // Apply initial settings when joining
-  useEffect(() => {
-    if (settings.general.enterFullScreenOnJoin && containerRef.current) {
-      containerRef.current.requestFullscreen().catch(console.error);
-    }
-    if (settings.general.muteOnJoin) {
-      toggleMic();
-      if (stream) {
-        stream.getAudioTracks().forEach((track) => (track.enabled = false));
-      }
-    }
-  }, []);
-
-  // Add device change handling
-  useEffect(() => {
-    const handleDeviceChange = async () => {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const hasVideo = devices.some((device) => device.kind === "videoinput");
-        const hasAudio = devices.some((device) => device.kind === "audioinput");
-
-        if (!hasVideo && isCameraOn) {
-          toggleCamera();
-          setMediaError("Video device disconnected");
-        }
-        if (!hasAudio && isMicOn) {
-          toggleMic();
-          setMediaError("Audio device disconnected");
-        }
-      } catch (error) {
-        console.error("Error handling device change:", error);
-      }
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isMobileDevice =
+        /mobile|android|iphone|ipad|ipod|windows phone/i.test(userAgent);
+      setIsMobile(isMobileDevice);
     };
 
-    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
-    return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        handleDeviceChange
-      );
-    };
-  }, [isMicOn, isCameraOn]);
-
-  // Add picture-in-picture and fullscreen functions
-  const togglePictureInPicture = async () => {
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-        setIsPictureInPicture(false);
-      } else if (userVideoRef.current) {
-        await userVideoRef.current.requestPictureInPicture();
-        setIsPictureInPicture(true);
-      }
-    } catch (error) {
-      console.error("Picture-in-Picture error:", error);
-      setMediaError(
-        "Picture-in-Picture mode is not supported in your browser."
-      );
-    }
-  };
-
-  const toggleFullScreen = async () => {
-    try {
-      if (!document.fullscreenElement && containerRef.current) {
-        await containerRef.current.requestFullscreen();
-        setIsFullScreen(true);
-      } else if (document.fullscreenElement) {
-        await document.exitFullscreen();
-        setIsFullScreen(false);
-      }
-    } catch (error) {
-      console.error("Fullscreen error:", error);
-      setMediaError("Fullscreen mode is not supported in your browser.");
-    }
-  };
-
-  // Add this function to handle video playback
-  const handleVideoPlay = useCallback(async (video: HTMLVideoElement) => {
-    if (playAttemptRef.current) {
-      // Wait for any existing play attempt to finish
-      try {
-        await playAttemptRef.current;
-      } catch (error: unknown) {
-        // Ignore AbortError as it's expected when switching streams
-        if (error instanceof Error && error.name !== "AbortError") {
-          console.warn("Previous play attempt failed:", error);
-        }
-      }
-      playAttemptRef.current = null;
-    }
-
-    if (video.paused) {
-      try {
-        playAttemptRef.current = video.play();
-        await playAttemptRef.current;
-        playAttemptRef.current = null;
-      } catch (error: unknown) {
-        if (error instanceof Error && error.name === "AbortError") {
-          // Ignore abort errors - these happen when quickly switching streams
-          return;
-        }
-        console.warn("Failed to play video:", error);
-      }
-    }
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
   }, []);
+
+  // Add this effect to set up transcription when the stream is available
+  useEffect(() => {
+    if (stream && sidebarContent === "ai" && !isTranscribing && !isProcessing) {
+      console.log("Starting transcription automatically with stream");
+      handleToggleTranscription();
+    }
+  }, [
+    stream,
+    sidebarContent,
+    isTranscribing,
+    isProcessing,
+    handleToggleTranscription,
+  ]);
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -1051,7 +906,6 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>{isMicOn ? "Mute" : "Unmute"}</TooltipContent>
                 </Tooltip>
-
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1070,7 +924,6 @@ export default function Meeting({
                     {isCameraOn ? "Stop Video" : "Start Video"}
                   </TooltipContent>
                 </Tooltip>
-
                 {isMobile && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1085,7 +938,6 @@ export default function Meeting({
                     <TooltipContent>Switch Camera</TooltipContent>
                   </Tooltip>
                 )}
-
                 {!isMobile && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1106,7 +958,6 @@ export default function Meeting({
                     </TooltipContent>
                   </Tooltip>
                 )}
-
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1125,7 +976,6 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Participants</TooltipContent>
                 </Tooltip>
-
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1142,23 +992,21 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Chat</TooltipContent>
                 </Tooltip>
-
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setSidebarContent("ai");
-                        handleToggleTranscription();
-                      }}
+                      variant="outline"
+                      size="icon"
+                      onClick={() =>
+                        setSidebarContent(sidebarContent === "ai" ? null : "ai")
+                      }
                     >
-                      <Mic className="h-4 w-4" />
+                      <ScrollText className="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>AI</TooltipContent>
+                  <TooltipContent>Transcription</TooltipContent>
                 </Tooltip>
               </div>
-
               <Button
                 variant="destructive"
                 onClick={leaveMeeting}
@@ -1172,6 +1020,7 @@ export default function Meeting({
                   <TooltipTrigger asChild>
                     <Button
                       variant="outline"
+                      size="icon"
                       onClick={copyMeetingLink}
                       className="text-sm"
                     >
@@ -1180,7 +1029,6 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Copy Meeting Link</TooltipContent>
                 </Tooltip>
-
                 <DropdownMenu>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1192,7 +1040,6 @@ export default function Meeting({
                     </TooltipTrigger>
                     <TooltipContent>More Options</TooltipContent>
                   </Tooltip>
-
                   <DropdownMenuContent align="end" className="z-[9999]">
                     <DropdownMenuItem
                       onClick={() => setShowSettingsModal(true)}
@@ -1200,12 +1047,16 @@ export default function Meeting({
                       <Settings className="mr-2 h-4 w-4" /> Settings
                     </DropdownMenuItem>
                     {!isMobile && (
-                      <DropdownMenuItem onClick={togglePictureInPicture}>
+                      <DropdownMenuItem
+                        onClick={() => setIsPictureInPicture((prev) => !prev)}
+                      >
                         <Minimize2 className="mr-2 h-4 w-4" /> Picture in
                         Picture
                       </DropdownMenuItem>
                     )}
-                    <DropdownMenuItem onClick={toggleFullScreen}>
+                    <DropdownMenuItem
+                      onClick={() => setIsFullScreen(!isFullScreen)}
+                    >
                       {isFullScreen ? (
                         <Minimize2 className="mr-2 h-4 w-4" />
                       ) : (
@@ -1395,7 +1246,7 @@ export default function Meeting({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
           >
-            Meeting link copied to clipboard!
+            Meeting link copied to clipboard
           </motion.div>
         )}
 
@@ -1610,7 +1461,6 @@ export default function Meeting({
                 Here&apos;s a summary of your meeting
               </DialogDescription>
             </DialogHeader>
-
             {meetingSummary ? (
               <div className="space-y-4">
                 <div>
@@ -1639,7 +1489,6 @@ export default function Meeting({
                     ))}
                   </ul>
                 </div>
-
                 <div className="pt-4 flex justify-end space-x-2">
                   <Button
                     variant="outline"
@@ -1649,7 +1498,6 @@ export default function Meeting({
                         meetingId: params.meetingCode,
                         date: new Date().toISOString(),
                       };
-
                       // Download summary as JSON
                       const blob = new Blob(
                         [JSON.stringify(summary, null, 2)],

@@ -89,33 +89,37 @@ export function useMediaDevices(settings: MediaSettings) {
         cleanupMediaStream(stream);
       }
 
-      // Add delay before requesting new stream to ensure proper cleanup
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Try with video first
+      try {
+        console.log("Requesting media with video and audio...");
+        const mediaStream = await navigator.mediaDevices.getUserMedia(
+          getMediaConstraints()
+        );
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia(
-        getMediaConstraints()
-      );
+        console.log("Media access granted with video and audio");
+        setupStreamListeners(mediaStream);
+        setStream(mediaStream);
+        return mediaStream;
+      } catch (videoError) {
+        console.warn("Failed to get video, trying audio only:", videoError);
 
-      // Set up track cleanup handlers
-      mediaStream.getTracks().forEach((track) => {
-        // Single event listener for track ended
-        const handleTrackEnded = () => {
-          console.log(`${track.kind} track ended`);
-          if (track.readyState === "ended") {
-            setMediaError(`${track.kind} track ended unexpectedly`);
-            // Try to restart the track
-            initializeMedia().catch(console.error);
-          }
-        };
+        // If video fails, try audio only
+        try {
+          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
+            audio: getMediaConstraints().audio,
+            video: false,
+          });
 
-        track.addEventListener("ended", handleTrackEnded, { once: true });
-
-        // Store the listener reference for cleanup
-        track.onended = handleTrackEnded;
-      });
-
-      setStream(mediaStream);
-      return mediaStream;
+          console.log("Media access granted with audio only");
+          setupStreamListeners(audioOnlyStream);
+          setMediaState((prev) => ({ ...prev, isCameraOn: false }));
+          setStream(audioOnlyStream);
+          return audioOnlyStream;
+        } catch (audioError) {
+          console.error("Failed to get audio:", audioError);
+          throw audioError;
+        }
+      }
     } catch (error) {
       console.error("Error initializing media:", error);
       setMediaError(
@@ -126,6 +130,23 @@ export function useMediaDevices(settings: MediaSettings) {
       return null;
     }
   }, [getMediaConstraints, stream, cleanupMediaStream]);
+
+  // Add this helper function to set up stream event listeners
+  const setupStreamListeners = useCallback((mediaStream: MediaStream) => {
+    mediaStream.getTracks().forEach((track) => {
+      console.log(`Track added: ${track.kind}, enabled: ${track.enabled}`);
+
+      const handleTrackEnded = () => {
+        console.log(`${track.kind} track ended`);
+        if (track.readyState === "ended") {
+          setMediaError(`${track.kind} track ended unexpectedly`);
+        }
+      };
+
+      track.addEventListener("ended", handleTrackEnded, { once: true });
+      track.onended = handleTrackEnded;
+    });
+  }, []);
 
   const toggleMic = useCallback(() => {
     if (stream) {

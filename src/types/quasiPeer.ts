@@ -72,17 +72,18 @@ export interface TranscriptionResult {
   confidence: number;
   language: string;
   timestamp: number;
-  participantId?: string;
+  participantId: string;
 }
 
-export interface TranslationResult extends TranscriptionResult {
+export interface TranslationResult {
+  text: string;
+  translatedText: string;
+  confidence: number;
+  language: string;
   originalLanguage: string;
   targetLanguage: string;
-  translatedText: string;
-  sentiment?: {
-    score: number;
-    label: string;
-  };
+  timestamp: number;
+  participantId: string;
 }
 
 export interface MeetingSummary {
