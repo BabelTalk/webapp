@@ -50,91 +50,124 @@ export function useQuasiPeer({
   const producersRef = useRef<Map<string, any>>(new Map());
   const consumersRef = useRef<Map<string, any>>(new Map());
   const streamRef = useRef<MediaStream | null>(null);
+  const isConnectingRef = useRef(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Initialize connection to QuasiPeer server
+  // Cleanup function
+  const cleanup = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    if (socketRef.current) {
+      socketRef.current.removeAllListeners();
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    setIsConnected(false);
+    isConnectingRef.current = false;
+  }, []);
+
+  // Initialize connection
   const connect = useCallback(
     async (stream: MediaStream) => {
+      // Prevent multiple connection attempts
+      if (isConnectingRef.current || socketRef.current?.connected) {
+        console.log("Connection already in progress or established");
+        return;
+      }
+
       try {
-        // Store the stream
+        // Clean up any existing connection
+        cleanup();
+
+        isConnectingRef.current = true;
         streamRef.current = stream;
 
-        // Connect to signaling server
-        socketRef.current = io(process.env.NEXT_PUBLIC_QUASI_PEER_URL || "", {
-          transports: ["websocket"],
-        });
+        // Create socket instance
+        socketRef.current = io(
+          process.env.NEXT_PUBLIC_QUASI_PEER_URL || "http://localhost:3004",
+          {
+            transports: ["websocket"],
+            reconnection: false, // We'll handle reconnection manually
+            autoConnect: false,
+            forceNew: true,
+            path: "/socket.io",
+          }
+        );
 
-        // Create mediasoup Device
-        deviceRef.current = new Device();
-
-        // Socket event handlers
+        // Set up event handlers before connecting
         socketRef.current.on("connect", () => {
+          console.log("Socket connected successfully");
           setIsConnected(true);
+          isConnectingRef.current = false;
 
           // Join the meeting
           socketRef.current?.emit("join-meeting", {
             meetingId,
             participantInfo: {
+              userName,
               preferredLanguage,
               role: ParticipantRole.PARTICIPANT,
               connectionInfo: {
                 userAgent: navigator.userAgent,
-                bandwidth: 1000000, // Default bandwidth
-                latency: 0, // Will be measured
-              } as ConnectionInfo,
+                bandwidth: 1000000,
+                latency: 0,
+              },
             },
           });
         });
 
-        // Handle router RTP capabilities
-        socketRef.current.on(
-          "router-rtp-capabilities",
-          async (routerRtpCapabilities) => {
-            try {
-              await deviceRef.current?.load({ routerRtpCapabilities });
-              await createSendTransport();
-              await createRecvTransport();
-            } catch (error) {
-              console.error("Failed to load device:", error);
-              setError("Failed to initialize media device");
-            }
-          }
-        );
-
-        // Handle participant updates
-        socketRef.current.on(
-          "participant-joined",
-          (participant: Participant) => {
-            setParticipants((prev) => [...prev, participant]);
-            onParticipantJoined?.(participant);
-          }
-        );
-
-        socketRef.current.on("participant-left", (participantId: string) => {
-          setParticipants((prev) => prev.filter((p) => p.id !== participantId));
-          onParticipantLeft?.(participantId);
+        socketRef.current.on("connect_error", (error) => {
+          console.error("Socket connection error:", error);
+          handleConnectionError(
+            error instanceof Error ? error : new Error(String(error))
+          );
         });
 
-        // Handle AI results
-        socketRef.current.on(
-          "transcription-result",
-          (result: TranscriptionResult) => {
-            onTranscriptionResult?.(result);
-          }
-        );
+        socketRef.current.on("disconnect", (reason) => {
+          console.log("Socket disconnected:", reason);
+          setIsConnected(false);
 
-        socketRef.current.on(
-          "translation-result",
-          (result: TranslationResult) => {
-            onTranslationResult?.(result);
+          // Only attempt reconnect for certain disconnect reasons
+          if (
+            reason === "io server disconnect" ||
+            reason === "transport close"
+          ) {
+            handleReconnect();
           }
-        );
+        });
+
+        // Attempt connection
+        socketRef.current.connect();
       } catch (error) {
-        console.error("Failed to connect:", error);
-        setError("Failed to connect to meeting server");
+        console.error("Failed to initialize connection:", error);
+        handleConnectionError(error as Error);
       }
     },
-    [meetingId, userName, preferredLanguage]
+    [meetingId, userName, preferredLanguage, cleanup]
   );
+
+  // Handle connection errors
+  const handleConnectionError = useCallback((error: Error) => {
+    setError(`Connection error: ${error.message}`);
+    isConnectingRef.current = false;
+    handleReconnect();
+  }, []);
+
+  // Handle reconnection
+  const handleReconnect = useCallback(() => {
+    if (reconnectTimeoutRef.current) return;
+
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (streamRef.current) {
+        connect(streamRef.current);
+      }
+      reconnectTimeoutRef.current = null;
+    }, 5000); // Wait 5 seconds before reconnecting
+  }, [connect]);
 
   // Create WebRTC transport for sending media
   const createSendTransport = async () => {
@@ -384,10 +417,8 @@ export function useQuasiPeer({
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      disconnect();
-    };
-  }, [disconnect]);
+    return cleanup;
+  }, [cleanup]);
 
   return {
     isConnected,
