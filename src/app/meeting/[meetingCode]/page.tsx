@@ -1142,6 +1142,21 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Chat</TooltipContent>
                 </Tooltip>
+
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setSidebarContent("ai");
+                        handleToggleTranscription();
+                      }}
+                    >
+                      <Mic className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>AI</TooltipContent>
+                </Tooltip>
               </div>
 
               <Button
