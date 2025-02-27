@@ -29,7 +29,7 @@ import {
   AnimatePresence,
 } from "framer-motion";
 import { useUser } from "@auth0/nextjs-auth0/client";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -111,6 +111,26 @@ export default function Home() {
     const meetingCode = nanoid(10);
     router.push(`/meeting/${meetingCode}?new=true`);
   };
+
+  const handlePlay = useCallback(
+    (videoRef: React.RefObject<HTMLVideoElement>) => {
+      if (videoRef.current) {
+        videoRef.current
+          .play()
+          .then(() => {
+            console.log("Video playback started");
+          })
+          .catch((error) => {
+            if (error.name === "AbortError") {
+              console.log("Play request was interrupted");
+            } else {
+              console.error("Error starting video playback:", error);
+            }
+          });
+      }
+    },
+    []
+  );
 
   return (
     <div className="flex flex-col min-w-screen min-h-screen bg-gradient-to-b from-primary-50 to-white dark:from-gray-950 dark:to-gray-900 overflow-x-hidden">
