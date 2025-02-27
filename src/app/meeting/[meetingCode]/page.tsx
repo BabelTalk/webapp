@@ -78,6 +78,7 @@ import { useAudioProcessing } from "@/hooks/useAudioProcessing";
 import { useWebSocketConnection } from "@/hooks/useWebSocketConnection";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
+import { MediaPlayer } from "../../../components/MediaPlayer";
 
 interface PeerData {
   peer: Peer.Instance;
@@ -240,6 +241,7 @@ export default function Meeting({
   const peersRef = useRef<
     { peerID: string; peer: Peer.Instance; userName: string }[]
   >([]);
+  const playAttemptRef = useRef<Promise<void> | null>(null);
 
   // Add mobile detection and permissions
   const [isMobile, setIsMobile] = useState(false);
@@ -341,15 +343,7 @@ export default function Meeting({
     reconnectionAttempts,
     connect: connectSocket,
     disconnect: disconnectSocket,
-  } = useWebSocketConnection({
-    url: process.env.NEXT_PUBLIC_QUASI_PEER_URL || "",
-    roomId: params.meetingCode,
-    userName: user?.name || "Anonymous",
-    onParticipantJoined: handleParticipantJoined,
-    onParticipantLeft: handleParticipantLeft,
-    onPeerError: handlePeerError,
-    onConnectionError: handleConnectionError,
-  });
+  } = useWebSocketConnection(process.env.NEXT_PUBLIC_QUASI_PEER_URL || "");
 
   // Add missing functions
   const getMediaConstraints = () => ({
@@ -612,9 +606,13 @@ export default function Meeting({
           }
 
           // Update video element
-          if (userVideoRef.current) {
-            userVideoRef.current.srcObject = mediaStream;
-            await userVideoRef.current.play().catch(console.error);
+          if (userVideoRef.current && userVideoRef.current.paused) {
+            const playPromise = userVideoRef.current.play();
+            if (playPromise !== undefined) {
+              playPromise.catch((error) => {
+                console.error("Video play interrupted:", error);
+              });
+            }
           }
 
           // Connect to socket
@@ -655,14 +653,10 @@ export default function Meeting({
   }, [
     user,
     params.meetingCode,
-    isMicOn,
-    isCameraOn,
-    initializeMedia,
     connectSocket,
     disconnectSocket,
     socket,
     cleanupMediaStream,
-    screenStream,
     setMediaError,
   ]);
 
@@ -903,73 +897,6 @@ export default function Meeting({
     };
   }, [isMicOn, isCameraOn]);
 
-  // Update cleanup in main useEffect
-  useEffect(() => {
-    if (user) {
-      const initializeConnection = async () => {
-        try {
-          // Initialize media devices
-          const mediaStream = await initializeMedia();
-          if (!mediaStream) {
-            setMediaError("Failed to initialize media devices");
-            return;
-          }
-
-          // Update video element
-          if (userVideoRef.current) {
-            userVideoRef.current.srcObject = mediaStream;
-            await userVideoRef.current.play().catch(console.error);
-          }
-
-          // Connect to socket
-          await connectSocket();
-
-          // Join room
-          if (socket) {
-            socket.emit("join room", {
-              roomID: params.meetingCode,
-              userName: user.name || "Anonymous",
-              isMuted: !isMicOn,
-              isCameraOff: !isCameraOn,
-            });
-          }
-
-          return () => {
-            // Cleanup
-            cleanupMediaStream(mediaStream);
-            if (screenStream) {
-              cleanupMediaStream(screenStream);
-            }
-            disconnectSocket();
-          };
-        } catch (error) {
-          console.error("Error initializing connection:", error);
-          setMediaError("Failed to initialize connection");
-        }
-      };
-
-      if (navigator.mediaDevices) {
-        initializeConnection();
-      } else {
-        setMediaError(
-          "Your browser doesn't support media devices. Please try using a different browser."
-        );
-      }
-    }
-  }, [
-    user,
-    params.meetingCode,
-    isMicOn,
-    isCameraOn,
-    initializeMedia,
-    connectSocket,
-    disconnectSocket,
-    socket,
-    cleanupMediaStream,
-    screenStream,
-    setMediaError,
-  ]);
-
   // Add picture-in-picture and fullscreen functions
   const togglePictureInPicture = async () => {
     try {
@@ -1002,6 +929,36 @@ export default function Meeting({
       setMediaError("Fullscreen mode is not supported in your browser.");
     }
   };
+
+  // Add this function to handle video playback
+  const handleVideoPlay = useCallback(async (video: HTMLVideoElement) => {
+    if (playAttemptRef.current) {
+      // Wait for any existing play attempt to finish
+      try {
+        await playAttemptRef.current;
+      } catch (error: unknown) {
+        // Ignore AbortError as it's expected when switching streams
+        if (error instanceof Error && error.name !== "AbortError") {
+          console.warn("Previous play attempt failed:", error);
+        }
+      }
+      playAttemptRef.current = null;
+    }
+
+    if (video.paused) {
+      try {
+        playAttemptRef.current = video.play();
+        await playAttemptRef.current;
+        playAttemptRef.current = null;
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === "AbortError") {
+          // Ignore abort errors - these happen when quickly switching streams
+          return;
+        }
+        console.warn("Failed to play video:", error);
+      }
+    }
+  }, []);
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -1065,13 +1022,7 @@ export default function Meeting({
                   {!isCameraOn ? (
                     <UserAvatar name={user.name || "You"} />
                   ) : (
-                    <video
-                      ref={userVideoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover mirror"
-                    />
+                    stream && <MediaPlayer stream={stream} />
                   )}
                   <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
                     <span>{user.name || "You"}</span>
