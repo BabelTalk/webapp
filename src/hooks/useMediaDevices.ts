@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 
 interface MediaState {
   isMicOn: boolean;
@@ -59,26 +59,73 @@ export function useMediaDevices(settings: MediaSettings) {
 
   const cleanupMediaStream = useCallback((mediaStream: MediaStream | null) => {
     if (mediaStream) {
-      mediaStream.getTracks().forEach((track) => {
-        track.stop();
-        mediaStream.removeTrack(track);
+      const tracks = mediaStream.getTracks();
+      tracks.forEach((track) => {
+        // Remove all event listeners
+        const events = ["ended", "mute", "unmute"];
+        events.forEach((event) => {
+          track.removeEventListener(event, () => {});
+        });
+
+        // Ensure track is stopped
+        if (track.readyState === "live") {
+          track.stop();
+        }
+
+        // Remove from stream
+        try {
+          mediaStream.removeTrack(track);
+        } catch (error) {
+          console.warn("Error removing track:", error);
+        }
       });
     }
   }, []);
 
   const initializeMedia = useCallback(async () => {
     try {
+      // Clean up any existing stream first
+      if (stream) {
+        cleanupMediaStream(stream);
+      }
+
+      // Add delay before requesting new stream to ensure proper cleanup
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
       const mediaStream = await navigator.mediaDevices.getUserMedia(
         getMediaConstraints()
       );
+
+      // Set up track cleanup handlers
+      mediaStream.getTracks().forEach((track) => {
+        // Single event listener for track ended
+        const handleTrackEnded = () => {
+          console.log(`${track.kind} track ended`);
+          if (track.readyState === "ended") {
+            setMediaError(`${track.kind} track ended unexpectedly`);
+            // Try to restart the track
+            initializeMedia().catch(console.error);
+          }
+        };
+
+        track.addEventListener("ended", handleTrackEnded, { once: true });
+
+        // Store the listener reference for cleanup
+        track.onended = handleTrackEnded;
+      });
+
       setStream(mediaStream);
       return mediaStream;
     } catch (error) {
       console.error("Error initializing media:", error);
-      setMediaError("Failed to initialize media devices");
+      setMediaError(
+        error instanceof Error
+          ? error.message
+          : "Failed to initialize media devices"
+      );
       return null;
     }
-  }, [getMediaConstraints]);
+  }, [getMediaConstraints, stream, cleanupMediaStream]);
 
   const toggleMic = useCallback(() => {
     if (stream) {
@@ -199,6 +246,18 @@ export function useMediaDevices(settings: MediaSettings) {
       setMediaError("Failed to stop screen share");
     }
   }, [stream, screenStream, originalVideoTrack, cleanupMediaStream]);
+
+  // Add cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (stream) {
+        cleanupMediaStream(stream);
+      }
+      if (screenStream) {
+        cleanupMediaStream(screenStream);
+      }
+    };
+  }, [stream, screenStream, cleanupMediaStream]);
 
   return {
     stream,
