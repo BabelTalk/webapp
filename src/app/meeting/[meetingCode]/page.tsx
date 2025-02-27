@@ -493,7 +493,7 @@ export default function Meeting({
     isMicOn,
     isCameraOn,
     isMobile,
-  ]);
+  ]); 
 
   useEffect(() => {
     if (searchParams && searchParams.get("new") === "true") {
