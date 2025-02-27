@@ -21,12 +21,17 @@ export async function GET(req: Request) {
       },
       include: {
         reactions: true,
-        replyTo: true,
+        replyTo: {
+          include: {
+            reactions: true, // Include reactions on the replied message if needed
+          },
+        },
       },
       orderBy: {
         timestamp: "asc",
       },
     });
+    
 
     return NextResponse.json(messages);
   } catch (error) {

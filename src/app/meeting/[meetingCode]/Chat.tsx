@@ -43,7 +43,7 @@ interface Message {
   timestamp: string;
   reactions: Reaction[];
   status?: "sending" | "sent" | "delivered";
-  replyTo?: Message;
+  replyTo?: Message | null;
   roomId: string;
 }
 
@@ -69,7 +69,7 @@ const Chat: React.FC<ChatProps> = ({
 }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
-  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [replyingTo, setReplyingTo] = useState<{ [userId: string]: Message | null }>({});
   const [isPending, startTransition] = useTransition();
   const [isLoading, setIsLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(true);
@@ -98,8 +98,9 @@ const Chat: React.FC<ChatProps> = ({
     try {
       setIsLoading(true);
       const response = await fetch(`/api/messages?roomId=${roomID}`);
+      const data = await response.json();
+      console.log("Fetched messages:", data);
       if (response.ok) {
-        const data = await response.json();
         setMessages(data);
         scrollToBottom();
       }
@@ -116,32 +117,14 @@ const Chat: React.FC<ChatProps> = ({
 
     socket.current.on("receive message", (message: Message) => {
       setMessages((prevMessages) => {
-        const existingMessage = prevMessages.find(
-          (msg) =>
-            msg.id === message.id ||
-            (msg.content === message.content &&
-              msg.userName === message.userName &&
-              Math.abs(
-                new Date(msg.timestamp).getTime() -
-                  new Date(message.timestamp).getTime()
-              ) < 1000)
-        );
-
+        // Check if the message already exists
+        const existingMessage = prevMessages.find((msg) => msg.id === message.id);
         if (existingMessage) {
           return prevMessages.map((msg) =>
-            msg === existingMessage
-              ? { ...message, status: "delivered" as const }
-              : msg
+            msg.id === existingMessage.id ? { ...message, status: "delivered" } : msg
           );
         }
-
-        const newMessage = { ...message, status: "delivered" as const };
-        socket.current?.emit("message_delivered", {
-          messageId: message.id,
-          userName: message.userName,
-        });
-
-        return [...prevMessages, newMessage];
+        return [...prevMessages, { ...message, status: "delivered" }];
       });
       scrollToBottom();
     });
@@ -211,8 +194,10 @@ const Chat: React.FC<ChatProps> = ({
       reactions: [],
       status: "sending",
       roomId: roomID,
+      replyTo: replyingTo[userName] || null,
     };
 
+    // Optimistically add the message to the state
     setMessages((prev) => [...prev, newMessage]);
     scrollToBottom();
 
@@ -223,6 +208,7 @@ const Chat: React.FC<ChatProps> = ({
         body: JSON.stringify({
           ...newMessage,
           roomId: roomID,
+          replyToId: replyingTo[userName]?.id || null,
         }),
       });
 
@@ -233,22 +219,17 @@ const Chat: React.FC<ChatProps> = ({
 
       const savedMessage = await response.json();
 
-      socket.current.emit("send message", {
-        ...savedMessage,
-        status: "sent",
-      });
-
+      // Update the message status to "sent"
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === newMessage.id
-            ? { ...savedMessage, status: "sent" as const }
-            : msg
-        )
+        prev.map((msg) => (msg.id === newMessage.id ? { ...savedMessage, status: "sent" } : msg))
       );
+
+      // Clear the input field
+      setNewMessage("");
     } catch (error) {
       console.error("Error sending message:", error);
+      // Optionally remove the optimistic message if sending fails
       setMessages((prev) => prev.filter((msg) => msg.id !== newMessage.id));
-      throw error;
     }
   };
 
@@ -371,8 +352,18 @@ const Chat: React.FC<ChatProps> = ({
     }
   };
 
+  const handleReply = (message: Message) => {
+    setReplyingTo((prev) => ({
+      ...prev,
+      [userName]: message,
+    }));
+  };
+
   const cancelReply = () => {
-    setReplyingTo(null);
+    setReplyingTo((prev) => ({
+      ...prev,
+      [userName]: null,
+    }));
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -401,6 +392,8 @@ const Chat: React.FC<ChatProps> = ({
       console.error("Error clearing chat:", error);
     }
   };
+
+  console.log("Current messages:", messages);
 
   return (
     <div className="flex h-full flex-col">
@@ -442,20 +435,13 @@ const Chat: React.FC<ChatProps> = ({
                     msg.userName === userName ? "items-end" : "items-start"
                   )}
                 >
-                  {msg.replyTo && (
-                    <div
-                      className={cn(
-                        "text-xs text-muted-foreground mb-1 px-3 py-2 rounded bg-muted/30 border-l-2 border-primary",
-                        "flex flex-col gap-1 max-w-[300px] overflow-hidden"
-                      )}
-                    >
+                  {msg.replyTo && msg.replyTo.content && (
+                    <div className="text-xs text-muted-foreground mb-1 px-3 py-2 rounded bg-muted/30 border-l-2 border-primary">
                       <div className="flex items-center gap-2">
                         <Reply className="h-3 w-3" />
-                        <span className="font-medium">
-                          {msg.replyTo.userName}
-                        </span>
+                        <span className="font-medium">{msg.replyTo.userName || "Unknown"}</span>
                       </div>
-                      <p className="truncate">{msg.replyTo.content}</p>
+                      <p className="break-words">{msg.replyTo.content || "Original message unavailable"}</p>
                     </div>
                   )}
                   <div
@@ -511,7 +497,7 @@ const Chat: React.FC<ChatProps> = ({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent>
-              <ContextMenuItem onClick={() => setReplyingTo(msg)}>
+              <ContextMenuItem onClick={() => handleReply(msg)} disabled={!msg}>
                 <Reply className="h-4 w-4 mr-2" />
                 Reply
               </ContextMenuItem>
@@ -543,15 +529,13 @@ const Chat: React.FC<ChatProps> = ({
       </div>
 
       {/* Reply Preview */}
-      {replyingTo && (
+      {replyingTo[userName] && (
         <div className="border-t p-2 bg-muted/50 flex items-center justify-between">
           <div className="flex items-center gap-2 flex-1 max-w-[calc(100%-80px)]">
             <Reply className="h-4 w-4 shrink-0" />
             <div className="flex flex-col overflow-hidden">
-              <span className="text-sm font-medium">{replyingTo.userName}</span>
-              <span className="text-sm text-muted-foreground truncate">
-                {replyingTo.content}
-              </span>
+              <span className="text-sm font-medium">{replyingTo[userName]?.userName}</span>
+              <span className="text-sm text-muted-foreground truncate">{replyingTo[userName]?.content}</span>
             </div>
           </div>
           <Button
@@ -581,12 +565,12 @@ const Chat: React.FC<ChatProps> = ({
             value={newMessage}
             onChange={(e) => setNewMessage(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={`Type a message${replyingTo ? " (replying)" : ""}...`}
+            placeholder={`Type a message${replyingTo[userName] ? " (replying)" : ""}...`}
             className="flex-1"
             disabled={isLoading}
           />
           <Button
-            onClick={() => sendMessage(newMessage)}
+            onClick={() =>sendMessage(newMessage)}
             size="icon"
             className="shrink-0"
             disabled={!newMessage.trim() || isLoading}
