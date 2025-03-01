@@ -17,6 +17,8 @@ interface UseQuasiPeerOptions {
   onTranslationResult?: (result: TranslationResult) => void;
   onParticipantJoined?: (participant: Participant) => void;
   onParticipantLeft?: (participantId: string) => void;
+  maxReconnectionAttempts?: number;
+  enableLogging?: boolean;
 }
 
 interface MediaState {
@@ -33,6 +35,8 @@ export function useQuasiPeer({
   onTranslationResult,
   onParticipantJoined,
   onParticipantLeft,
+  maxReconnectionAttempts = 3,
+  enableLogging = false,
 }: UseQuasiPeerOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +46,8 @@ export function useQuasiPeer({
     isCameraOn: true,
     isScreenSharing: false,
   });
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [reconnectionAttempts, setReconnectionAttempts] = useState(0);
 
   const socketRef = useRef<Socket | null>(null);
   const deviceRef = useRef<Device | null>(null);
@@ -52,6 +58,35 @@ export function useQuasiPeer({
   const streamRef = useRef<MediaStream | null>(null);
   const isConnectingRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Enhanced logging function
+  const log = useCallback(
+    (...args: any[]) => {
+      if (enableLogging) {
+        console.log("[QuasiPeer]", ...args);
+      }
+    },
+    [enableLogging]
+  );
+
+  // Handle connection errors with reconnection logic
+  const handleConnectionError = useCallback(
+    (error: Error) => {
+      log("Connection error:", error);
+      setError(error.message);
+      isConnectingRef.current = false;
+
+      if (reconnectionAttempts < maxReconnectionAttempts) {
+        setIsReconnecting(true);
+        setReconnectionAttempts((prev) => prev + 1);
+        handleReconnect();
+      } else {
+        setIsReconnecting(false);
+        setError(`Connection failed after ${maxReconnectionAttempts} attempts`);
+      }
+    },
+    [maxReconnectionAttempts, reconnectionAttempts, log]
+  );
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -70,13 +105,21 @@ export function useQuasiPeer({
     isConnectingRef.current = false;
   }, []);
 
-  // Initialize connection
+  // Enhanced connect function with WSS support
   const connect = useCallback(
-    async (stream: MediaStream) => {
+    async (
+      stream: MediaStream,
+      options?: { isMuted?: boolean; isCameraOff?: boolean }
+    ): Promise<boolean> => {
       // Prevent multiple connection attempts
-      if (isConnectingRef.current || socketRef.current?.connected) {
-        console.log("Connection already in progress or established");
-        return;
+      if (isConnectingRef.current) {
+        log("Connection attempt already in progress");
+        return false;
+      }
+
+      if (socketRef.current?.connected) {
+        log("Connection already established");
+        return true;
       }
 
       try {
@@ -86,76 +129,108 @@ export function useQuasiPeer({
         isConnectingRef.current = true;
         streamRef.current = stream;
 
+        const serverUrl =
+          process.env.NEXT_PUBLIC_QUASI_PEER_URL || "wss://localhost:3004";
+        log("Connecting to:", serverUrl);
+
         // Create socket instance
-        socketRef.current = io(
-          process.env.NEXT_PUBLIC_QUASI_PEER_URL || "http://localhost:3004",
-          {
-            transports: ["websocket"],
-            reconnection: false, // We'll handle reconnection manually
-            autoConnect: false,
-            forceNew: true,
-            path: "/socket.io",
-          }
-        );
+        socketRef.current = io(serverUrl, {
+          transports: ["websocket"],
+          secure: true,
+          rejectUnauthorized: false, // Important for self-signed certs
+          reconnection: true,
+          reconnectionAttempts: maxReconnectionAttempts,
+        });
 
-        // Set up event handlers before connecting
-        socketRef.current.on("connect", () => {
-          console.log("Socket connected successfully");
-          setIsConnected(true);
-          isConnectingRef.current = false;
+        // Add error event listener
+        socketRef.current.on("error", (error: Error) => {
+          log("[SOCKET-DEBUG] Socket error:", error);
+        });
 
-          // Join the meeting
-          socketRef.current?.emit("join-meeting", {
-            meetingId,
-            participantInfo: {
-              userName,
-              preferredLanguage,
-              role: ParticipantRole.PARTICIPANT,
-              connectionInfo: {
-                userAgent: navigator.userAgent,
-                bandwidth: 1000000,
-                latency: 0,
+        return new Promise<boolean>((resolve) => {
+          // Set timeout for connection
+          const connectionTimeout = setTimeout(() => {
+            log("Connection timeout");
+            handleConnectionError(new Error("Connection timeout"));
+            resolve(false);
+          }, 10000);
+
+          // Set up event handlers
+          socketRef.current!.on("connect", () => {
+            log(`Connected with ID: ${socketRef.current?.id}`);
+            clearTimeout(connectionTimeout);
+            setIsConnected(true);
+            setIsReconnecting(false);
+            setReconnectionAttempts(0);
+            isConnectingRef.current = false;
+            setError(null);
+
+            // Join the meeting
+            socketRef.current?.emit("join-meeting", {
+              meetingId,
+              participantInfo: {
+                userName,
+                preferredLanguage,
+                role: ParticipantRole.PARTICIPANT,
+                connectionInfo: {
+                  userAgent: navigator.userAgent,
+                  bandwidth: 1000000,
+                  latency: 0,
+                },
+                isMuted: options?.isMuted || false,
+                isCameraOff: options?.isCameraOff || false,
               },
-            },
+            });
+
+            resolve(true);
           });
+
+          socketRef.current!.on("connect_error", (error) => {
+            log("Connect error:", error);
+            clearTimeout(connectionTimeout);
+            handleConnectionError(
+              error instanceof Error ? error : new Error(String(error))
+            );
+            resolve(false);
+          });
+
+          socketRef.current!.on("disconnect", (reason) => {
+            log("Disconnected:", reason);
+            setIsConnected(false);
+
+            // Only attempt reconnect for certain disconnect reasons
+            if (
+              reason === "io server disconnect" ||
+              reason === "transport close"
+            ) {
+              handleReconnect();
+            }
+          });
+
+          // Attempt connection
+          socketRef.current!.connect();
         });
-
-        socketRef.current.on("connect_error", (error) => {
-          console.error("Socket connection error:", error);
-          handleConnectionError(
-            error instanceof Error ? error : new Error(String(error))
-          );
-        });
-
-        socketRef.current.on("disconnect", (reason) => {
-          console.log("Socket disconnected:", reason);
-          setIsConnected(false);
-
-          // Only attempt reconnect for certain disconnect reasons
-          if (
-            reason === "io server disconnect" ||
-            reason === "transport close"
-          ) {
-            handleReconnect();
-          }
-        });
-
-        // Attempt connection
-        socketRef.current.connect();
       } catch (error) {
-        console.error("Failed to initialize connection:", error);
+        log("Failed to initialize connection:", error);
         handleConnectionError(error as Error);
+        return false;
       }
     },
-    [meetingId, userName, preferredLanguage, cleanup]
+    [log, maxReconnectionAttempts]
   );
 
-  // Handle connection errors
-  const handleConnectionError = useCallback((error: Error) => {
-    setError(`Connection error: ${error.message}`);
-    isConnectingRef.current = false;
-    handleReconnect();
-  }, []);
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      if (!socketRef.current?.connected && !isConnectingRef.current) {
+        log("Socket disconnected - attempting reconnection");
+        if (streamRef.current) {
+          connect(streamRef.current);
+        }
+      }
+    }, 10000); // Check every 10 seconds
+
+    return () => clearInterval(intervalId);
+  }, [connect]);
 
   // Handle reconnection
   const handleReconnect = useCallback(() => {
@@ -344,21 +419,39 @@ export function useQuasiPeer({
   const requestTranscription = useCallback(
     async (audioData: Float32Array): Promise<TranscriptionResult | null> => {
       try {
-        return new Promise((resolve) => {
-          socketRef.current?.emit(
+        return new Promise<TranscriptionResult | null>((resolve, reject) => {
+          if (!socketRef.current || !socketRef.current.connected) {
+            console.error("Socket not connected for transcription request");
+            resolve(null);
+            return;
+          }
+
+          // Add timeout handling
+          const timeoutId = setTimeout(() => {
+            console.warn("Transcription request timed out after 5000ms");
+            resolve(null);
+          }, 5000); // 5 second timeout
+
+          socketRef.current.emit(
             "transcription-request",
             { audio: audioData },
             (response: any) => {
-              if (response.error) {
+              clearTimeout(timeoutId); // Clear timeout on response
+
+              if (response?.error) {
                 console.error("Transcription error:", response.error);
                 resolve(null);
-              } else {
+              } else if (response) {
                 resolve({
                   text: response.text,
                   confidence: response.confidence,
                   language: response.language,
                   timestamp: Date.now(),
+                  participantId: response.participantId || "local-user",
                 });
+              } else {
+                console.error("Empty response from transcription server");
+                resolve(null);
               }
             }
           );
@@ -425,6 +518,10 @@ export function useQuasiPeer({
     error,
     participants,
     mediaState,
+    isReconnecting,
+    reconnectionAttempts,
+    maxReconnectionAttempts,
+    socket: socketRef.current,
     connect,
     disconnect,
     toggleMic,
