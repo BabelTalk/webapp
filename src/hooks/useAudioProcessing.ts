@@ -95,33 +95,9 @@ export function useAudioProcessing({
 
   const startProcessing = useCallback(
     async (stream: MediaStream) => {
-      if (!stream) {
-        console.error("Cannot start processing without a stream");
-        return false;
-      }
-
-      if (!isConnected) {
-        console.error(
-          "Cannot start processing without a connection to transcription service"
-        );
-        return false;
-      }
+      if (!stream || !isConnected) return;
 
       try {
-        console.log("Starting audio processing with stream:", stream.id);
-        console.log("Audio tracks:", stream.getAudioTracks().length);
-
-        // Check if we actually have audio
-        if (stream.getAudioTracks().length === 0) {
-          console.error("No audio tracks found in stream");
-          return false;
-        }
-
-        console.log(
-          "Audio track settings:",
-          stream.getAudioTracks()[0].getSettings()
-        );
-
         // Create AudioContext with optimal settings
         const ctx =
           audioContext ||
@@ -130,20 +106,14 @@ export function useAudioProcessing({
             sampleRate: 48000,
           });
         setAudioContext(ctx);
-        console.log("AudioContext created:", ctx.state);
 
         // Initialize AudioWorklet if needed
         if (!workletInitializedRef.current) {
-          console.log("Initializing AudioWorklet...");
           await initializeAudioWorklet();
-          console.log("AudioWorklet initialized");
         }
 
         // Create and configure nodes
-        console.log("Creating MediaStreamSource");
         const source = ctx.createMediaStreamSource(stream);
-
-        console.log("Creating AudioWorkletNode");
         const workletNode = new AudioWorkletNode(ctx, "audio-processor", {
           numberOfInputs: 1,
           numberOfOutputs: 1,
@@ -158,40 +128,27 @@ export function useAudioProcessing({
           if (!isProcessing) return;
 
           if (event.data.type === "buffer-ready") {
-            console.log(
-              "Audio buffer received from worklet, length:",
-              event.data.buffer.length
-            );
             try {
               const transcriptionResult = await requestTranscription(
                 event.data.buffer
               );
               if (transcriptionResult) {
-                console.log(
-                  "Transcription result received:",
-                  transcriptionResult
-                );
                 onTranscriptionResult?.(transcriptionResult);
-              } else {
-                console.warn("No transcription result returned");
               }
             } catch (error) {
-              console.error("Error processing audio for transcription:", error);
+              console.error("Error processing audio:", error);
             }
           }
         };
 
         // Connect the audio graph
-        console.log("Connecting audio graph");
         source.connect(workletNode);
         workletNode.connect(ctx.destination);
-        console.log("Audio graph connected");
 
         // Store references
         workletNodeRef.current = workletNode;
 
         const cleanup = () => {
-          console.log("Cleaning up audio processing");
           workletNode.port.onmessage = null;
           workletNode.disconnect();
           source.disconnect();
@@ -200,12 +157,9 @@ export function useAudioProcessing({
 
         cleanupRef.current = cleanup;
         setIsProcessing(true);
-        console.log("Audio processing started successfully");
-        return true;
       } catch (error) {
         console.error("Failed to initialize audio processing:", error);
         setIsProcessing(false);
-        return false;
       }
     },
     [
