@@ -31,6 +31,9 @@ export function useMediaDevices(settings: MediaSettings) {
   const [originalVideoTrack, setOriginalVideoTrack] =
     useState<MediaStreamTrack | null>(null);
 
+  const streamRef = useRef<MediaStream | null>(null);
+  const initCountRef = useRef(0);
+
   const getMediaConstraints = useCallback(() => {
     const constraints: MediaStreamConstraints = {
       audio: {
@@ -58,8 +61,13 @@ export function useMediaDevices(settings: MediaSettings) {
   }, [settings, mediaState.isBackCamera]);
 
   const cleanupMediaStream = useCallback((mediaStream: MediaStream | null) => {
+    console.log("[DEBUG] Cleanup called for stream:", mediaStream?.id);
     if (mediaStream) {
       const tracks = mediaStream.getTracks();
+      console.log(
+        "[DEBUG] Cleaning up tracks:",
+        tracks.map((t) => ({ kind: t.kind, id: t.id, state: t.readyState }))
+      );
       tracks.forEach((track) => {
         // Remove all event listeners
         const events = ["ended", "mute", "unmute"];
@@ -70,11 +78,13 @@ export function useMediaDevices(settings: MediaSettings) {
         // Ensure track is stopped
         if (track.readyState === "live") {
           track.stop();
+          console.log("[DEBUG] Stopped track:", track.id);
         }
 
         // Remove from stream
         try {
           mediaStream.removeTrack(track);
+          console.log("[DEBUG] Removed track from stream:", track.id);
         } catch (error) {
           console.warn("Error removing track:", error);
         }
@@ -82,21 +92,69 @@ export function useMediaDevices(settings: MediaSettings) {
     }
   }, []);
 
+  // Add this helper function to set up stream event listeners
+  const setupStreamListeners = useCallback((mediaStream: MediaStream) => {
+    mediaStream.getTracks().forEach((track) => {
+      console.log(`Track added: ${track.kind}, enabled: ${track.enabled}`);
+
+      const handleTrackEnded = () => {
+        console.log(`${track.kind} track ended`);
+        if (track.readyState === "ended") {
+          setMediaError(`${track.kind} track ended unexpectedly`);
+        }
+      };
+
+      track.addEventListener("ended", handleTrackEnded, { once: true });
+      track.onended = handleTrackEnded;
+    });
+  }, []);
+
   const initializeMedia = useCallback(async () => {
+    initCountRef.current++;
+    const currentInitCount = initCountRef.current;
+    console.log(`[DEBUG] Initialize media called (count: ${currentInitCount})`);
+
     try {
+      // If we already have a valid stream with active tracks, return it
+      if (
+        streamRef.current &&
+        streamRef.current
+          .getTracks()
+          .some((track) => track.readyState === "live")
+      ) {
+        console.log("[DEBUG] Reusing existing stream:", streamRef.current.id);
+        return streamRef.current;
+      }
+
       // Clean up any existing stream first
-      if (stream) {
-        cleanupMediaStream(stream);
+      if (streamRef.current) {
+        console.log(
+          "[DEBUG] Cleaning up existing stream:",
+          streamRef.current.id
+        );
+        cleanupMediaStream(streamRef.current);
+        streamRef.current = null;
       }
 
       // Try with video first
       try {
-        console.log("Requesting media with video and audio...");
+        console.log(
+          "[DEBUG] Requesting media with constraints:",
+          getMediaConstraints()
+        );
         const mediaStream = await navigator.mediaDevices.getUserMedia(
           getMediaConstraints()
         );
 
-        console.log("Media access granted with video and audio");
+        // Check if this initialization is still relevant
+        if (currentInitCount !== initCountRef.current) {
+          console.log("[DEBUG] Initialization superseded by newer call");
+          cleanupMediaStream(mediaStream);
+          return null;
+        }
+
+        console.log("[DEBUG] New stream created:", mediaStream.id);
+        streamRef.current = mediaStream;
         setupStreamListeners(mediaStream);
         setStream(mediaStream);
         return mediaStream;
@@ -110,7 +168,17 @@ export function useMediaDevices(settings: MediaSettings) {
             video: false,
           });
 
-          console.log("Media access granted with audio only");
+          // Check if this initialization is still relevant
+          if (currentInitCount !== initCountRef.current) {
+            console.log(
+              "[DEBUG] Audio-only initialization superseded by newer call"
+            );
+            cleanupMediaStream(audioOnlyStream);
+            return null;
+          }
+
+          console.log("[DEBUG] Media access granted with audio only");
+          streamRef.current = audioOnlyStream;
           setupStreamListeners(audioOnlyStream);
           setMediaState((prev) => ({ ...prev, isCameraOn: false }));
           setStream(audioOnlyStream);
@@ -129,24 +197,7 @@ export function useMediaDevices(settings: MediaSettings) {
       );
       return null;
     }
-  }, [getMediaConstraints, stream, cleanupMediaStream]);
-
-  // Add this helper function to set up stream event listeners
-  const setupStreamListeners = useCallback((mediaStream: MediaStream) => {
-    mediaStream.getTracks().forEach((track) => {
-      console.log(`Track added: ${track.kind}, enabled: ${track.enabled}`);
-
-      const handleTrackEnded = () => {
-        console.log(`${track.kind} track ended`);
-        if (track.readyState === "ended") {
-          setMediaError(`${track.kind} track ended unexpectedly`);
-        }
-      };
-
-      track.addEventListener("ended", handleTrackEnded, { once: true });
-      track.onended = handleTrackEnded;
-    });
-  }, []);
+  }, [getMediaConstraints, cleanupMediaStream, setupStreamListeners]);
 
   const toggleMic = useCallback(() => {
     if (stream) {
@@ -268,17 +319,35 @@ export function useMediaDevices(settings: MediaSettings) {
     }
   }, [stream, screenStream, originalVideoTrack, cleanupMediaStream]);
 
-  // Add cleanup on unmount
+  // Update cleanup logging in the main useEffect
   useEffect(() => {
+    console.log("[DEBUG] MediaDevices hook mounted");
+
+    // Set up device change listener
+    const handleDeviceChange = async () => {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      console.log("[DEBUG] Devices changed:", devices.length);
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
     return () => {
-      if (stream) {
-        cleanupMediaStream(stream);
-      }
-      if (screenStream) {
-        cleanupMediaStream(screenStream);
+      console.log("[DEBUG] MediaDevices hook unmounting");
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange
+      );
+
+      if (streamRef.current) {
+        console.log(
+          "[DEBUG] Cleaning up stream on unmount:",
+          streamRef.current.id
+        );
+        cleanupMediaStream(streamRef.current);
+        streamRef.current = null;
       }
     };
-  }, [stream, screenStream, cleanupMediaStream]);
+  }, [cleanupMediaStream]);
 
   return {
     stream,
