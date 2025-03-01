@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "@auth0/nextjs-auth0/client";
-import io, { Socket } from "socket.io-client";
 import Peer from "simple-peer";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -28,7 +27,7 @@ import {
   MessageCircle,
   Paperclip,
   SendIcon,
-  ScrollText, // Add this import
+  ScrollText,
 } from "lucide-react";
 import {
   Dialog,
@@ -76,16 +75,16 @@ import { TranslationPanel } from "@/components/meeting/TranslationPanel";
 import type { TranscriptionResult, TranslationResult } from "@/types/quasiPeer";
 import { useMediaDevices } from "@/hooks/useMediaDevices";
 import { useAudioProcessing } from "@/hooks/useAudioProcessing";
-import { useWebSocketConnection } from "@/hooks/useWebSocketConnection";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
-import { MediaPlayer } from "../../../components/MediaPlayer";
+
 interface PeerData {
   peer: Peer.Instance;
   userName: string;
   isMuted: boolean;
   isCameraOff: boolean;
 }
+
 interface SettingsState {
   video: {
     sendResolution: string;
@@ -101,9 +100,12 @@ interface SettingsState {
     muteOnJoin: boolean;
   };
 }
+
 type LayoutType = "speaker" | "grid" | "sidebar";
+
 // Add this type for sidebar content
 type SidebarContent = "chat" | "participants" | "ai" | null;
+
 // Add this interface near the top of the file with other interfaces
 interface User {
   id: string;
@@ -112,6 +114,7 @@ interface User {
   isCameraOff: boolean;
   isHost?: boolean;
 }
+
 function UserAvatar({ name }: { name: string }) {
   const initials = name
     .split(" ")
@@ -119,6 +122,7 @@ function UserAvatar({ name }: { name: string }) {
     .slice(0, 2)
     .join("")
     .toUpperCase();
+
   return (
     <div className="w-full h-full flex items-center justify-center bg-gray-700">
       <div className="w-24 h-24 rounded-full bg-primary flex items-center justify-center text-3xl font-semibold text-primary-foreground">
@@ -127,22 +131,27 @@ function UserAvatar({ name }: { name: string }) {
     </div>
   );
 }
+
 // Add type for audio cleanup
 type AudioCleanupFn = () => void;
+
 // Add ref types
 interface TranscriptionPanelRef {
   addTranscription: (result: TranscriptionResult) => void;
   getTranscripts: () => TranscriptionResult[];
 }
+
 interface TranslationPanelRef {
   addTranslation: (result: TranslationResult) => void;
 }
+
 // Add types for new features
 interface SentimentAnalysis {
   score: number; // -1 to 1
   label: "negative" | "neutral" | "positive";
   timestamp: number;
 }
+
 interface SpeakerSegment {
   speakerId: string;
   speakerName: string;
@@ -151,6 +160,7 @@ interface SpeakerSegment {
   endTime: number;
   sentiment?: SentimentAnalysis;
 }
+
 interface MeetingAnalytics {
   duration: number;
   participantCount: number;
@@ -171,11 +181,14 @@ interface MeetingAnalytics {
     participants: string[];
   }[];
 }
+
 export default function Meeting({
   params,
 }: {
   params: { meetingCode: string };
 }) {
+  console.log("[DEBUG] Meeting component render");
+
   const { user, isLoading } = useUser();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -184,8 +197,6 @@ export default function Meeting({
   const [showNewMeetingModal, setShowNewMeetingModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
-  const [copyMeetingLink, setCopyMeetingLink] = useState();
-  const [switchCamera, setSwitchCamera] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [currentLayout, setCurrentLayout] = useState<LayoutType>("speaker");
   const [settings, setSettings] = useState<SettingsState>({
@@ -203,6 +214,7 @@ export default function Meeting({
       muteOnJoin: false,
     },
   });
+
   // Add state for meeting summary and analytics
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [meetingSummary, setMeetingSummary] = useState<{
@@ -220,6 +232,7 @@ export default function Meeting({
     useState<MeetingAnalytics | null>(null);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [meetingStartTime] = useState<number>(Date.now());
+
   // Add refs
   const transcriptionPanelRef = useRef<TranscriptionPanelRef>(null);
   const translationPanelRef = useRef<TranslationPanelRef>(null);
@@ -229,6 +242,7 @@ export default function Meeting({
     { peerID: string; peer: Peer.Instance; userName: string }[]
   >([]);
   const playAttemptRef = useRef<Promise<void> | null>(null);
+
   // Add mobile detection and permissions
   const [isMobile, setIsMobile] = useState(false);
   const [cameraPermission, setCameraPermission] =
@@ -238,6 +252,7 @@ export default function Meeting({
   );
   const [sidebarContent, setSidebarContent] = useState<SidebarContent>(null);
   const [isHost, setIsHost] = useState(false);
+
   // Use mediaDevices hook with renamed functions to avoid conflicts
   const {
     stream,
@@ -253,11 +268,11 @@ export default function Meeting({
     cleanupMediaStream,
     setMediaError,
   } = useMediaDevices(settings);
+
   const [availableResolutions, setAvailableResolutions] = useState<string[]>(
     []
   );
-  const socketRef = useRef<Socket | null>(null);
-  const MAX_RECONNECTION_ATTEMPTS = 3;
+
   // Handler functions
   const handleTranscriptionResult = useCallback(
     (result: TranscriptionResult) => {
@@ -265,12 +280,22 @@ export default function Meeting({
     },
     []
   );
+
+  const handleParticipantJoined = useCallback((participant: any) => {
+    console.log("New participant joined:", participant);
+  }, []);
+
+  const handleParticipantLeft = useCallback((participantId: string) => {
+    console.log("Participant left:", participantId);
+  }, []);
+
   const handleSpeakerIdentified = useCallback(
     (speakerId: string, speakerName: string) => {
       setCurrentSpeaker(speakerName);
     },
     []
   );
+
   const handleSentimentAnalyzed = useCallback(
     (sentiment: { score: number; label: string }) => {
       setSentimentAnalysis((prev: SentimentAnalysis[]) => [
@@ -284,12 +309,7 @@ export default function Meeting({
     },
     []
   );
-  const handleParticipantJoined = useCallback((participant: any) => {
-    console.log("New participant joined:", participant);
-  }, []);
-  const handleParticipantLeft = useCallback((participantId: string) => {
-    console.log("Participant left:", participantId);
-  }, []);
+
   const handlePeerError = useCallback(
     (error: Error) => {
       console.error("Peer connection error:", error);
@@ -297,6 +317,7 @@ export default function Meeting({
     },
     [setMediaError]
   );
+
   const handleConnectionError = useCallback(
     (error: Error) => {
       console.error("Connection error:", error);
@@ -304,6 +325,64 @@ export default function Meeting({
     },
     [setMediaError]
   );
+
+  const handleVideoPlay = useCallback(async (video: HTMLVideoElement) => {
+    try {
+      // Ensure video element is valid and has a valid srcObject
+      if (!video || !video.srcObject) {
+        console.log("Video element or srcObject not ready");
+        return;
+      }
+
+      // Cancel any existing play attempts
+      if (playAttemptRef.current) {
+        try {
+          await playAttemptRef.current;
+        } catch (e) {
+          console.log("Previous play attempt cancelled");
+        }
+        playAttemptRef.current = null;
+      }
+
+      // Start a new play attempt
+      console.log("Attempting to play video...");
+      playAttemptRef.current = video.play();
+      await playAttemptRef.current;
+      console.log("Video playback started successfully");
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.name === "AbortError") {
+          console.log("Play request was interrupted by a new load request");
+        } else {
+          console.error("Failed to play video:", error);
+        }
+      }
+    } finally {
+      playAttemptRef.current = null;
+    }
+  }, []);
+
+  const {
+    isConnected,
+    error: connectionError,
+    isReconnecting,
+    reconnectionAttempts,
+    maxReconnectionAttempts,
+    connect: connectToServer,
+    disconnect: disconnectFromServer,
+    socket,
+  } = useQuasiPeer({
+    meetingId: params.meetingCode,
+    userName: user?.name || "Anonymous",
+    preferredLanguage: selectedLanguage,
+    onTranscriptionResult: handleTranscriptionResult,
+    onTranslationResult: translationPanelRef.current?.addTranslation,
+    onParticipantJoined: handleParticipantJoined,
+    onParticipantLeft: handleParticipantLeft,
+    maxReconnectionAttempts: 3,
+    enableLogging: true,
+  });
+
   const { isProcessing, startProcessing, stopProcessing } = useAudioProcessing({
     onTranscriptionResult: handleTranscriptionResult,
     onSpeakerIdentified: handleSpeakerIdentified,
@@ -311,354 +390,33 @@ export default function Meeting({
     userName: user?.name || "Anonymous",
     preferredLanguage: "en",
   });
-  const {
-    socket,
-    isConnected,
-    isReconnecting,
-    reconnectionAttempts,
-    connect: connectSocket,
-    disconnect: disconnectSocket,
-  } = useWebSocketConnection(process.env.NEXT_PUBLIC_QUASI_PEER_URL || "");
-  // Add missing functions
-  const getMediaConstraints = () => ({
-    video: {
-      width:
-        settings.video.sendResolution === "1080p"
-          ? 1920
-          : settings.video.sendResolution === "720p"
-          ? 1280
-          : 854,
-      height:
-        settings.video.sendResolution === "1080p"
-          ? 1080
-          : settings.video.sendResolution === "720p"
-          ? 720
-          : 480,
-      frameRate: settings.video.frameRate,
-    },
-    audio: {
-      noiseSuppression: settings.audio.noiseSuppression,
-      echoCancellation: settings.audio.echoCancellation,
-    },
-  });
-  const requestTranslation = async (text: string, targetLanguage: string) => {
-    try {
-      const response = await fetch("/api/translate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, targetLanguage }),
-      });
-      const result = await response.json();
-      return result;
-    } catch (error) {
-      console.error("Translation error:", error);
-      return null;
-    }
-  };
-  // Update toggleMicState function
-  const toggleMicState = () => {
-    if (stream) {
-      stream.getAudioTracks().forEach((track) => (track.enabled = !isMicOn));
-      toggleMic();
-    }
-  };
-  // Update toggleCameraState function
-  const toggleCameraState = () => {
-    if (stream) {
-      stream.getVideoTracks().forEach((track) => (track.enabled = !isCameraOn));
-      toggleCamera();
-    }
-  };
-  // Update leaveMeeting function
-  const leaveMeeting = () => {
-    socket?.disconnect();
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-    }
-    router.push("/");
-  };
-  // Update createPeer function
-  function createPeer(
-    userToSignal: string,
-    callerID: string,
-    stream: MediaStream
-  ) {
-    const peer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" },
-        ],
-      },
-    });
-    peer.on("signal", (signal) => {
-      socket?.emit("sending signal", {
-        userToSignal,
-        callerID,
-        signal,
-        userName: user?.name || "Anonymous",
-      });
-    });
-    return peer;
-  }
-  // Update addPeer function
-  function addPeer(
-    incomingSignal: Peer.SignalData,
-    callerID: string,
-    stream: MediaStream
-  ) {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" },
-        ],
-      },
-    });
-    peer.on("signal", (signal) => {
-      socket?.emit("returning signal", { signal, callerID });
-    });
-    peer.signal(incomingSignal);
-    return peer;
-  }
-  // Add function to get video layout class
-  const getVideoLayout = useCallback(() => {
-    if (peers.length === 0) return "w-full h-full";
-    if (currentLayout === "grid") {
-      return cn(
-        "w-full h-full grid gap-2",
-        peers.length === 1 && "grid-cols-1",
-        peers.length === 2 && "grid-cols-2",
-        peers.length > 2 && "grid-cols-3 grid-rows-2"
-      );
-    }
-    return "w-1/4 h-1/4 absolute bottom-4 right-4";
-  }, [peers.length, currentLayout]);
-  // Add function to handle host actions
-  const handleHostAction = useCallback(
-    (action: string, userId: string) => {
-      if (!isHost || !socket) return;
-      socket.emit("host-action", { action, userId });
-    },
-    [isHost, socket]
-  );
-  // Add function to handle transcription toggle
+
   const handleToggleTranscription = useCallback(async () => {
-    if (!stream) {
-      console.error("Cannot toggle transcription without a stream");
-      setMediaError("Microphone access is needed for transcription");
-      return;
-    }
-
     console.log("Toggle transcription, current state:", isTranscribing);
-
-    if (!isTranscribing) {
-      try {
+    try {
+      if (!isTranscribing) {
         console.log("Starting audio processing for transcription");
-        const success = await startProcessing(stream);
-        if (success) {
-          console.log("Transcription started successfully");
-          setIsTranscribing(true);
-
-          // Make sure sidebar is open when starting transcription
-          if (sidebarContent !== "ai") {
-            setSidebarContent("ai");
-          }
-        } else {
-          console.error("Failed to start transcription");
-          setMediaError("Failed to start transcription. Please try again.");
+        if (!stream) {
+          toast.error("No audio stream available");
+          return;
         }
-      } catch (error) {
-        console.error("Error starting transcription:", error);
-        setMediaError(
-          "Error starting transcription: " +
-            (error instanceof Error ? error.message : String(error))
-        );
-      }
-    } else {
-      console.log("Stopping transcription");
-      stopProcessing();
-      setIsTranscribing(false);
-    }
-  }, [
-    stream,
-    isTranscribing,
-    startProcessing,
-    stopProcessing,
-    sidebarContent,
-    setSidebarContent,
-    setMediaError,
-  ]);
 
-  // Add function to retry media access
-  const retryMediaAccess = useCallback(async () => {
-    setMediaError(null);
-    const success = await initializeMedia();
-    if (success) {
-      setMediaError(null);
-    }
-  }, [initializeMedia, setMediaError]);
-
-  // Update the main useEffect to handle permissions better without repeatedly initializing media
-  useEffect(() => {
-    if (user) {
-      const initializeConnection = async () => {
-        try {
-          // Initialize media devices
-          const mediaStream = await initializeMedia();
-          if (!mediaStream) {
-            setMediaError("Failed to initialize media devices");
-            return;
-          }
-
-          // Connect to socket
-          await connectSocket();
-
-          // Join room
-          if (socket) {
-            socket.emit("join room", {
-              roomID: params.meetingCode,
-              userName: user.name || "Anonymous",
-              isMuted: !isMicOn,
-              isCameraOff: !isCameraOn,
-            });
-          }
-
-          return () => {
-            // Cleanup
-            cleanupMediaStream(mediaStream);
-            if (screenStream) {
-              cleanupMediaStream(screenStream);
-            }
-            disconnectSocket();
-          };
-        } catch (error) {
-          console.error("Error initializing connection:", error);
-          setMediaError("Failed to initialize connection");
-        }
-      };
-
-      if (navigator.mediaDevices) {
-        initializeConnection();
+        await startProcessing(stream);
+        // No need to check the return value - useAudioProcessing manages the state internally
+        setIsTranscribing(true);
       } else {
-        setMediaError(
-          "Your browser doesn't support media devices. Please try using a different browser."
-        );
+        console.log("Stopping transcription");
+        stopProcessing();
+        setIsTranscribing(false);
       }
+    } catch (error) {
+      console.error("Error toggling transcription:", error);
+      toast.error("Error toggling transcription");
     }
-  }, [
-    user,
-    params.meetingCode,
-    connectSocket,
-    disconnectSocket,
-    socket,
-    cleanupMediaStream,
-    setMediaError,
-  ]);
+  }, [isTranscribing, stream, startProcessing, stopProcessing]);
 
-  // Add this effect to set up transcription when the stream is available
-  useEffect(() => {
-    if (stream && sidebarContent === "ai" && !isTranscribing && !isProcessing) {
-      console.log("Starting transcription automatically with stream");
-      handleToggleTranscription();
-    }
-  }, [
-    stream,
-    sidebarContent,
-    isTranscribing,
-    isProcessing,
-    handleToggleTranscription,
-  ]);
-
-  // Update the main useEffect to handle permissions better
-  useEffect(() => {
-    if (user) {
-      const initializeConnection = async () => {
-        try {
-          // Initialize media devices
-          const mediaStream = await initializeMedia();
-          if (!mediaStream) {
-            setMediaError("Failed to initialize media devices");
-            return;
-          }
-
-          // Update video element
-          if (userVideoRef.current && userVideoRef.current.paused) {
-            const playPromise = userVideoRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise.catch((error) => {
-                console.error("Video play interrupted:", error);
-              });
-            }
-          }
-
-          // Connect to socket
-          await connectSocket();
-
-          // Join rooms
-          if (socket) {
-            socket.emit("join room", {
-              roomID: params.meetingCode,
-              userName: user.name || "Anonymous",
-              isMuted: !isMicOn,
-              isCameraOff: !isCameraOn,
-            });
-          }
-
-          return () => {
-            // Cleanup
-            cleanupMediaStream(mediaStream);
-            if (screenStream) {
-              cleanupMediaStream(screenStream);
-            }
-            disconnectSocket();
-          };
-        } catch (error) {
-          console.error("Error initializing connection:", error);
-          setMediaError("Failed to initialize connection");
-        }
-      };
-
-      if (navigator.mediaDevices) {
-        initializeConnection();
-      } else {
-        setMediaError(
-          "Your browser doesn't support media devices. Please try using a different browser."
-        );
-      }
-    }
-  }, [
-    user,
-    params.meetingCode,
-    connectSocket,
-    disconnectSocket,
-    socket,
-    cleanupMediaStream,
-    setMediaError,
-  ]);
-
-  // Detect mobile devices
-  useEffect(() => {
-    const checkMobile = () => {
-      const userAgent = navigator.userAgent.toLowerCase();
-      const isMobileDevice =
-        /mobile|android|iphone|ipad|ipod|windows phone/i.test(userAgent);
-      setIsMobile(isMobileDevice);
-    };
-
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => window.removeEventListener("resize", checkMobile);
-  }, []);
-
-  // Update the permission check function
-  const checkAndRequestPermissions = async () => {
+  // Move checkAndRequestPermissions here, before the useEffect that uses it
+  const checkAndRequestPermissions = useCallback(async () => {
     try {
       // For mobile browsers, we need to explicitly request permissions one by one
       try {
@@ -718,76 +476,301 @@ export default function Meeting({
       );
       return false;
     }
-  };
+  }, [setMediaError]);
 
-  // Update the main useEffect to handle permissions better
+  // Remove the second useEffect that handles permissions and keep only one main useEffect
   useEffect(() => {
-    if (user) {
-      const initializeConnection = async () => {
-        try {
-          // Initialize media devices
-          const mediaStream = await initializeMedia();
-          if (!mediaStream) {
-            setMediaError("Failed to initialize media devices");
+    console.log("[DEBUG] Main effect triggered with deps:", {
+      userExists: !!user,
+      meetingCode: params.meetingCode,
+      isConnected,
+    });
+
+    let mounted = true;
+    let initializationTimeout: NodeJS.Timeout | null = null;
+    let initializationInProgress = false;
+
+    const cleanup = () => {
+      console.log("[DEBUG] Main effect cleanup called");
+      mounted = false;
+      if (initializationTimeout) {
+        console.log("[DEBUG] Clearing initialization timeout");
+        clearTimeout(initializationTimeout);
+      }
+      // Only cleanup media if we're actually unmounting or changing meeting rooms
+      if (!user || params.meetingCode === undefined) {
+        if (stream) {
+          console.log("[DEBUG] Cleaning up media stream in main effect");
+          cleanupMediaStream(stream);
+        }
+        if (screenStream) {
+          console.log("[DEBUG] Cleaning up screen stream in main effect");
+          cleanupMediaStream(screenStream);
+        }
+        disconnectFromServer();
+      }
+    };
+
+    const initializeConnection = async () => {
+      // Prevent multiple simultaneous initializations
+      if (initializationInProgress || !mounted) return;
+      initializationInProgress = true;
+
+      console.log("[DEBUG] Initialize connection called");
+      try {
+        // Check permissions first
+        const permissionsGranted = await checkAndRequestPermissions();
+        if (!mounted) return;
+        if (!permissionsGranted) {
+          console.log("[DEBUG] Permissions not granted");
+          initializationInProgress = false;
+          return;
+        }
+
+        // Only initialize media if we don't have a valid stream
+        if (!stream && mounted) {
+          console.log("[DEBUG] Calling initializeMedia");
+          const newStream = await initializeMedia();
+          // Check if still mounted after async call
+          if (!mounted) {
+            if (newStream) cleanupMediaStream(newStream);
             return;
           }
-
-          // Update video element
-          if (userVideoRef.current && userVideoRef.current.paused) {
-            const playPromise = userVideoRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise.catch((error) => {
-                console.error("Video play interrupted:", error);
-              });
-            }
+          if (!newStream) {
+            console.log("[DEBUG] Media initialization failed");
+            setMediaError("Failed to initialize media devices");
+            initializationInProgress = false;
+            return;
           }
+        }
 
-          // Connect to socket
-          await connectSocket();
+        // Set video source only if it has changed and we're still mounted
+        if (
+          mounted &&
+          userVideoRef.current &&
+          userVideoRef.current.srcObject !== stream &&
+          stream
+        ) {
+          console.log("[DEBUG] Updating video srcObject");
+          userVideoRef.current.srcObject = stream;
 
-          // Join rooms
-          if (socket) {
-            socket.emit("join room", {
-              roomID: params.meetingCode,
-              userName: user.name || "Anonymous",
-              isMuted: !isMicOn,
-              isCameraOff: !isCameraOn,
-            });
-          }
-
-          return () => {
-            // Cleanup
-            cleanupMediaStream(mediaStream);
-            if (screenStream) {
-              cleanupMediaStream(screenStream);
+          // Add a small delay before attempting to play
+          if (initializationTimeout) clearTimeout(initializationTimeout);
+          initializationTimeout = setTimeout(() => {
+            if (mounted && userVideoRef.current) {
+              console.log("[DEBUG] Attempting to play video after delay");
+              handleVideoPlay(userVideoRef.current);
             }
-            disconnectSocket();
-          };
-        } catch (error) {
-          console.error("Error initializing connection:", error);
+          }, 100);
+        }
+
+        // Connect using QuasiPeer only if we're not already connected and still mounted
+        if (mounted && !isConnected && stream) {
+          console.log("[DEBUG] Connecting to server");
+          await connectToServer(stream, {
+            isMuted: !isMicOn,
+            isCameraOff: !isCameraOn,
+          });
+        }
+      } catch (error) {
+        if (mounted) {
+          console.error("[DEBUG] Error initializing connection:", error);
           setMediaError("Failed to initialize connection");
         }
-      };
-
-      if (navigator.mediaDevices) {
-        initializeConnection();
-      } else {
-        setMediaError(
-          "Your browser doesn't support media devices. Please try using a different browser."
-        );
+      } finally {
+        initializationInProgress = false;
       }
+    };
+
+    if (user && navigator.mediaDevices) {
+      initializeConnection();
+    } else if (user) {
+      setMediaError(
+        "Your browser doesn't support media devices. Please try using a different browser."
+      );
     }
+
+    return cleanup;
   }, [
     user,
     params.meetingCode,
-    connectSocket,
-    disconnectSocket,
-    socket,
+    connectToServer,
+    disconnectFromServer,
     cleanupMediaStream,
     setMediaError,
+    handleVideoPlay,
+    isConnected,
+    checkAndRequestPermissions,
+    stream,
+    screenStream,
+    isMicOn,
+    isCameraOn,
+    initializeMedia,
   ]);
 
-  // Detect mobile devices
+  // Add missing functions
+  const getMediaConstraints = () => ({
+    video: {
+      width:
+        settings.video.sendResolution === "1080p"
+          ? 1920
+          : settings.video.sendResolution === "720p"
+          ? 1280
+          : 854,
+      height:
+        settings.video.sendResolution === "1080p"
+          ? 1080
+          : settings.video.sendResolution === "720p"
+          ? 720
+          : 480,
+      frameRate: settings.video.frameRate,
+    },
+    audio: {
+      noiseSuppression: settings.audio.noiseSuppression,
+      echoCancellation: settings.audio.echoCancellation,
+    },
+  });
+
+  const requestTranslation = async (text: string, targetLanguage: string) => {
+    try {
+      const response = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, targetLanguage }),
+      });
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error("Translation error:", error);
+      return null;
+    }
+  };
+
+  // Update toggleMicState function
+  const toggleMicState = () => {
+    if (stream) {
+      stream.getAudioTracks().forEach((track) => (track.enabled = !isMicOn));
+      toggleMic();
+    }
+  };
+
+  // Update toggleCameraState function
+  const toggleCameraState = () => {
+    if (stream) {
+      stream.getVideoTracks().forEach((track) => (track.enabled = !isCameraOn));
+      toggleCamera();
+    }
+  };
+
+  // Update leaveMeeting function
+  const leaveMeeting = useCallback(() => {
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    disconnectFromServer();
+    router.push("/");
+  }, [stream, disconnectFromServer, router]);
+
+  // Update createPeer function to use QuasiPeer's socket
+  function createPeer(
+    userToSignal: string,
+    callerID: string,
+    stream: MediaStream
+  ) {
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+        ],
+      },
+    });
+
+    peer.on("signal", (signal) => {
+      if (socket) {
+        socket.emit("sending signal", {
+          userToSignal,
+          callerID,
+          signal,
+          userName: user?.name || "Anonymous",
+        });
+      }
+    });
+
+    return peer;
+  }
+
+  // Update addPeer function to use QuasiPeer's socket
+  function addPeer(
+    incomingSignal: Peer.SignalData,
+    callerID: string,
+    stream: MediaStream
+  ) {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+        ],
+      },
+    });
+
+    peer.on("signal", (signal) => {
+      if (socket) {
+        socket.emit("returning signal", { signal, callerID });
+      }
+    });
+
+    peer.signal(incomingSignal);
+
+    return peer;
+  }
+
+  // Add function to get video layout class
+  const getVideoLayout = useCallback(() => {
+    if (peers.length === 0) return "w-full h-full";
+    if (currentLayout === "grid") {
+      return cn(
+        "w-full h-full grid gap-2",
+        peers.length === 1 && "grid-cols-1",
+        peers.length === 2 && "grid-cols-2",
+        peers.length > 2 && "grid-cols-3 grid-rows-2"
+      );
+    }
+    return "w-1/4 h-1/4 absolute bottom-4 right-4";
+  }, [peers.length, currentLayout]);
+
+  // Add function to handle host actions
+  const handleHostAction = useCallback(
+    (action: string, userId: string) => {
+      if (!isHost || !socket) return;
+      socket.emit("host-action", { action, userId });
+    },
+    [isHost, socket]
+  );
+
+  // Add function to retry media access
+  const retryMediaAccess = useCallback(async () => {
+    setMediaError(null);
+    const success = await initializeMedia();
+    if (success) {
+      setMediaError(null);
+    }
+  }, [initializeMedia, setMediaError]);
+
+  useEffect(() => {
+    if (!user && !isLoading) {
+      router.push("/");
+    }
+  }, [user, isLoading, router]);
+
+  // Detect mobile device
   useEffect(() => {
     const checkMobile = () => {
       const userAgent = navigator.userAgent.toLowerCase();
@@ -801,20 +784,277 @@ export default function Meeting({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  // Add this effect to set up transcription when the stream is available
   useEffect(() => {
-    if (stream && sidebarContent === "ai" && !isTranscribing && !isProcessing) {
-      console.log("Starting transcription automatically with stream");
-      handleToggleTranscription();
+    if (searchParams && searchParams.get("new") === "true") {
+      setShowNewMeetingModal(true);
     }
-  }, [
-    stream,
-    sidebarContent,
-    isTranscribing,
-    isProcessing,
-    handleToggleTranscription,
-  ]);
+  }, [searchParams]);
 
+  // Update switchCamera function
+  const switchCamera = async () => {
+    if (!stream) return;
+
+    try {
+      // Stop and cleanup old video tracks
+      const oldVideoTracks = stream.getVideoTracks();
+      oldVideoTracks.forEach((track) => {
+        track.stop();
+        stream.removeTrack(track);
+      });
+
+      // Get new stream with different camera
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        ...getMediaConstraints(),
+        video: {
+          ...(getMediaConstraints().video as MediaTrackConstraints),
+          facingMode: isBackCamera ? "user" : "environment",
+        },
+      });
+
+      // Keep the existing audio track
+      const audioTrack = stream.getAudioTracks()[0];
+      const newVideoTrack = newStream.getVideoTracks()[0];
+
+      // Stop tracks from the temporary new stream
+      newStream.getAudioTracks().forEach((track) => {
+        track.stop();
+        newStream.removeTrack(track);
+      });
+
+      // Add the new video track to the existing stream
+      stream.addTrack(newVideoTrack);
+
+      // Update local video
+      if (userVideoRef.current) {
+        userVideoRef.current.srcObject = stream;
+      }
+
+      setIsBackCamera(!isBackCamera);
+
+      // Update QuasiPeer connection
+      const videoProducer = producersRef.current?.get("video");
+      if (videoProducer) {
+        await videoProducer.replaceTrack({ track: newVideoTrack });
+      }
+    } catch (error) {
+      console.error("Error switching camera:", error);
+      setMediaError("Failed to switch camera. Please try again.");
+    }
+  };
+
+  // Add missing state variables
+  const [isBackCamera, setIsBackCamera] = useState(false);
+  const [originalVideoTrack, setOriginalVideoTrack] =
+    useState<MediaStreamTrack | null>(null);
+  const producersRef = useRef<Map<string, any>>(new Map());
+
+  // Add missing audio state variables
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [audioProcessor, setAudioProcessor] =
+    useState<ScriptProcessorNode | null>(null);
+
+  // Add copyMeetingLink function
+  const copyMeetingLink = useCallback(async () => {
+    const meetingUrl = `${window.location.origin}/meeting/${params.meetingCode}`;
+    try {
+      await navigator.clipboard.writeText(meetingUrl);
+      toast.success("Meeting link copied to clipboard");
+    } catch (error) {
+      console.error("Failed to copy meeting link:", error);
+      toast.error("Failed to copy meeting link");
+    }
+  }, [params.meetingCode]);
+
+  // Add function to detect supported resolutions
+  const detectSupportedResolutions = async () => {
+    const resolutions = [
+      { width: 1920, height: 1080, label: "1080p" },
+      { width: 1280, height: 720, label: "720p" },
+      { width: 854, height: 480, label: "480p" },
+      { width: 640, height: 360, label: "360p" },
+    ] as const;
+
+    const supported: string[] = [];
+    for (const res of resolutions) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: res.width },
+            height: { ideal: res.height },
+          },
+        });
+        supported.push(res.label);
+        stream.getTracks().forEach((track) => track.stop());
+      } catch (e) {
+        console.log(`Resolution ${res.label} not supported`);
+      }
+    }
+
+    // Always include at least 360p if nothing else is supported
+    if (supported.length === 0) {
+      supported.push("360p");
+    }
+
+    setAvailableResolutions(supported);
+
+    // Set initial resolution to the highest available
+    if (supported.length > 0) {
+      setSettings((prev) => ({
+        ...prev,
+        video: {
+          ...prev.video,
+          sendResolution: supported[0],
+        },
+      }));
+    }
+  };
+
+  // Call detection on component mount
+  useEffect(() => {
+    detectSupportedResolutions();
+  }, []);
+
+  // Apply video settings
+  const applyVideoSettings = async () => {
+    if (stream) {
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const constraints = {
+          width:
+            settings.video.sendResolution === "1080p"
+              ? 1920
+              : settings.video.sendResolution === "720p"
+              ? 1280
+              : 854,
+          height:
+            settings.video.sendResolution === "1080p"
+              ? 1080
+              : settings.video.sendResolution === "720p"
+              ? 720
+              : 480,
+          frameRate: settings.video.frameRate,
+        };
+
+        try {
+          await videoTrack.applyConstraints(constraints);
+        } catch (error) {
+          console.error("Error applying video constraints:", error);
+          setMediaError(
+            "Failed to apply video settings. Your device may not support these settings."
+          );
+        }
+      }
+    }
+  };
+
+  // Apply audio settings
+  const applyAudioSettings = async () => {
+    if (stream) {
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack) {
+        const constraints = {
+          noiseSuppression: settings.audio.noiseSuppression,
+          echoCancellation: settings.audio.echoCancellation,
+        };
+
+        try {
+          await audioTrack.applyConstraints(constraints);
+        } catch (error) {
+          console.error("Error applying audio constraints:", error);
+          setMediaError(
+            "Failed to apply audio settings. Your device may not support these settings."
+          );
+        }
+      }
+    }
+  };
+
+  // Watch for settings changes
+  useEffect(() => {
+    applyVideoSettings();
+  }, [settings.video]);
+
+  useEffect(() => {
+    applyAudioSettings();
+  }, [settings.audio]);
+
+  // Apply initial settings when joining
+  useEffect(() => {
+    if (settings.general.enterFullScreenOnJoin && containerRef.current) {
+      containerRef.current.requestFullscreen().catch(console.error);
+    }
+    if (settings.general.muteOnJoin) {
+      toggleMic();
+      if (stream) {
+        stream.getAudioTracks().forEach((track) => (track.enabled = false));
+      }
+    }
+  }, []);
+
+  // Add device change handling
+  useEffect(() => {
+    const handleDeviceChange = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const hasVideo = devices.some((device) => device.kind === "videoinput");
+        const hasAudio = devices.some((device) => device.kind === "audioinput");
+
+        if (!hasVideo && isCameraOn) {
+          toggleCamera();
+          setMediaError("Video device disconnected");
+        }
+        if (!hasAudio && isMicOn) {
+          toggleMic();
+          setMediaError("Audio device disconnected");
+        }
+      } catch (error) {
+        console.error("Error handling device change:", error);
+      }
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange
+      );
+    };
+  }, [isMicOn, isCameraOn]);
+
+  // Add picture-in-picture and fullscreen functions
+  const togglePictureInPicture = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPictureInPicture(false);
+      } else if (userVideoRef.current) {
+        await userVideoRef.current.requestPictureInPicture();
+        setIsPictureInPicture(true);
+      }
+    } catch (error) {
+      console.error("Picture-in-Picture error:", error);
+      setMediaError(
+        "Picture-in-Picture mode is not supported in your browser."
+      );
+    }
+  };
+
+  const toggleFullScreen = async () => {
+    try {
+      if (!document.fullscreenElement && containerRef.current) {
+        await containerRef.current.requestFullscreen();
+        setIsFullScreen(true);
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        setIsFullScreen(false);
+      }
+    } catch (error) {
+      console.error("Fullscreen error:", error);
+      setMediaError("Fullscreen mode is not supported in your browser.");
+    }
+  };
+
+  // Add loading and user checks
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -877,7 +1117,21 @@ export default function Meeting({
                   {!isCameraOn ? (
                     <UserAvatar name={user.name || "You"} />
                   ) : (
-                    stream && <MediaPlayer stream={stream} />
+                    <video
+                      ref={userVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover mirror"
+                      onLoadedMetadata={(e) => {
+                        const video = e.target as HTMLVideoElement;
+                        handleVideoPlay(video);
+                      }}
+                      onError={(e) => {
+                        const video = e.target as HTMLVideoElement;
+                        console.error("Video error:", video.error);
+                      }}
+                    />
                   )}
                   <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded flex items-center space-x-2">
                     <span>{user.name || "You"}</span>
@@ -906,6 +1160,7 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>{isMicOn ? "Mute" : "Unmute"}</TooltipContent>
                 </Tooltip>
+
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -924,6 +1179,7 @@ export default function Meeting({
                     {isCameraOn ? "Stop Video" : "Start Video"}
                   </TooltipContent>
                 </Tooltip>
+
                 {isMobile && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -938,6 +1194,7 @@ export default function Meeting({
                     <TooltipContent>Switch Camera</TooltipContent>
                   </Tooltip>
                 )}
+
                 {!isMobile && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -958,6 +1215,7 @@ export default function Meeting({
                     </TooltipContent>
                   </Tooltip>
                 )}
+
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -976,6 +1234,7 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Participants</TooltipContent>
                 </Tooltip>
+
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -992,14 +1251,16 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Chat</TooltipContent>
                 </Tooltip>
+
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      variant="outline"
-                      size="icon"
                       onClick={() =>
                         setSidebarContent(sidebarContent === "ai" ? null : "ai")
                       }
+                      variant={sidebarContent === "ai" ? "default" : "outline"}
+                      className="flex items-center gap-2"
+                      title="Transcription"
                     >
                       <ScrollText className="h-4 w-4" />
                     </Button>
@@ -1007,6 +1268,7 @@ export default function Meeting({
                   <TooltipContent>Transcription</TooltipContent>
                 </Tooltip>
               </div>
+
               <Button
                 variant="destructive"
                 onClick={leaveMeeting}
@@ -1020,7 +1282,6 @@ export default function Meeting({
                   <TooltipTrigger asChild>
                     <Button
                       variant="outline"
-                      size="icon"
                       onClick={copyMeetingLink}
                       className="text-sm"
                     >
@@ -1029,6 +1290,7 @@ export default function Meeting({
                   </TooltipTrigger>
                   <TooltipContent>Copy Meeting Link</TooltipContent>
                 </Tooltip>
+
                 <DropdownMenu>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1040,6 +1302,7 @@ export default function Meeting({
                     </TooltipTrigger>
                     <TooltipContent>More Options</TooltipContent>
                   </Tooltip>
+
                   <DropdownMenuContent align="end" className="z-[9999]">
                     <DropdownMenuItem
                       onClick={() => setShowSettingsModal(true)}
@@ -1047,16 +1310,12 @@ export default function Meeting({
                       <Settings className="mr-2 h-4 w-4" /> Settings
                     </DropdownMenuItem>
                     {!isMobile && (
-                      <DropdownMenuItem
-                        onClick={() => setIsPictureInPicture((prev) => !prev)}
-                      >
+                      <DropdownMenuItem onClick={togglePictureInPicture}>
                         <Minimize2 className="mr-2 h-4 w-4" /> Picture in
                         Picture
                       </DropdownMenuItem>
                     )}
-                    <DropdownMenuItem
-                      onClick={() => setIsFullScreen(!isFullScreen)}
-                    >
+                    <DropdownMenuItem onClick={toggleFullScreen}>
                       {isFullScreen ? (
                         <Minimize2 className="mr-2 h-4 w-4" />
                       ) : (
@@ -1246,7 +1505,7 @@ export default function Meeting({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
           >
-            Meeting link copied to clipboard
+            Meeting link copied to clipboard!
           </motion.div>
         )}
 
@@ -1461,6 +1720,7 @@ export default function Meeting({
                 Here&apos;s a summary of your meeting
               </DialogDescription>
             </DialogHeader>
+
             {meetingSummary ? (
               <div className="space-y-4">
                 <div>
@@ -1489,6 +1749,7 @@ export default function Meeting({
                     ))}
                   </ul>
                 </div>
+
                 <div className="pt-4 flex justify-end space-x-2">
                   <Button
                     variant="outline"
@@ -1498,6 +1759,7 @@ export default function Meeting({
                         meetingId: params.meetingCode,
                         date: new Date().toISOString(),
                       };
+
                       // Download summary as JSON
                       const blob = new Blob(
                         [JSON.stringify(summary, null, 2)],
@@ -1538,7 +1800,7 @@ export default function Meeting({
             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
             <span>
               Reconnecting... Attempt {reconnectionAttempts}/
-              {MAX_RECONNECTION_ATTEMPTS}
+              {maxReconnectionAttempts}
             </span>
           </div>
         )}
