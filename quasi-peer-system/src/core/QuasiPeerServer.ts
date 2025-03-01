@@ -1,5 +1,6 @@
 import { Server } from "socket.io";
 import { createServer } from "http";
+import https from "https";
 import Redis from "ioredis";
 import * as mediasoup from "mediasoup";
 import { types as mediasoupTypes } from "mediasoup";
@@ -13,9 +14,14 @@ import type {
   ServerMetrics,
   MeetingSummary,
 } from "../types";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
 
 export class QuasiPeerServer {
   private io: Server;
+  private httpsServer: https.Server;
   private redis: Redis;
   private participants: Map<string, Participant>;
   private metrics: ServerMetrics;
@@ -53,20 +59,64 @@ export class QuasiPeerServer {
     mr: "mr_IN",
   };
 
+  private setupHealthCheck(): void {
+    this.httpsServer.on("request", (req, res) => {
+      if (req.url === "/health") {
+        const healthStatus = {
+          status: "ok",
+          timestamp: new Date().toISOString(),
+          services: {
+            redis: this.redis.status === "ready",
+            mediasoup: !!this.mediasoupWorker && !this.mediasoupWorker.closed,
+            socketio: this.io.engine.clientsCount >= 0,
+          },
+          metrics: {
+            activeParticipants: this.metrics.activeParticipants,
+            activeTranscriptions: this.metrics.activeTranscriptions,
+            activeTranslations: this.metrics.activeTranslations,
+            cpuUsage: this.metrics.cpuUsage,
+            memoryUsage: this.metrics.memoryUsage,
+          },
+        };
+
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(JSON.stringify(healthStatus, null, 2));
+        return;
+      }
+    });
+  }
+
   constructor() {
-    const httpServer = createServer();
-    this.io = new Server(httpServer, {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+
+    const httpsOptions = {
+      key: fs.readFileSync(
+        path.join(__dirname, "..", "..", "certificates", "localhost.key")
+      ),
+      cert: fs.readFileSync(
+        path.join(__dirname, "..", "..", "certificates", "localhost.crt")
+      ),
+    };
+
+    this.httpsServer = https.createServer(httpsOptions);
+    this.io = new Server(this.httpsServer, {
       cors: {
         origin: "*",
         methods: ["GET", "POST"],
       },
+      transports: ["websocket"],
+      allowEIO3: true,
     });
 
     this.redis = new Redis(config.redisUrl);
     this.participants = new Map();
     this.metrics = this.initializeMetrics();
     this.setupPrometheusMetrics();
-
+    this.setupHealthCheck();
     this.setupMediasoup();
     this.setupAIPipelines();
     this.setupSocketHandlers();
@@ -734,8 +784,11 @@ export class QuasiPeerServer {
     try {
       await this.redis.ping();
       await this.setupMediasoup();
-      this.io.listen(config.port);
-      console.log(`QuasiPeer server listening on port ${config.port}`);
+      this.httpsServer.listen(config.port, () => {
+        console.log(
+          `QuasiPeer server listening on port ${config.port} (HTTPS/WSS)`
+        );
+      });
     } catch (error) {
       console.error("Failed to start server:", error);
       throw error;
