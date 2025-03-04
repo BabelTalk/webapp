@@ -1,4 +1,4 @@
-import { Server } from "socket.io";
+import { Server, Namespace, Socket } from "socket.io";
 import { createServer } from "http";
 import https from "https";
 import Redis from "ioredis";
@@ -18,6 +18,15 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import axios from "axios";
+import WebSocket from "ws";
+
+interface PendingTranscriptionRequest {
+  requestId: string;
+  resolve: (result: any) => void;
+  reject: (error: any) => void;
+  timeout: NodeJS.Timeout;
+}
 
 export class QuasiPeerServer {
   private io: Server;
@@ -32,6 +41,7 @@ export class QuasiPeerServer {
   private speechRecognitionPipeline: any;
   private translationPipelines: Map<string, any> = new Map();
   private summaryPipeline: any;
+  private transcriptionNamespace: Namespace;
 
   // Prometheus metrics
   private activeParticipantsGauge!: Gauge<string>;
@@ -58,6 +68,22 @@ export class QuasiPeerServer {
     hi: "hi_IN",
     mr: "mr_IN",
   };
+
+  private readonly WHISPER_SAMPLE_RATE = 16000;
+  private readonly MIN_AUDIO_LENGTH = 8000; // Reduced to 0.5 seconds (was 16000)
+  private readonly MAX_AUDIO_LENGTH = 16000; // Added max length of 1 second
+  private audioBuffer: Float32Array | null = null;
+
+  private aiServiceClient: any;
+
+  // Add new properties for WebSocket handling
+  private aiWebSocket: WebSocket | null = null;
+  private wsReconnectInterval: NodeJS.Timeout | null = null;
+  private pendingTranscriptionRequests: Map<string, (result: any) => void> =
+    new Map();
+
+  // Add a new property to track microphone state
+  private isMicrophoneActive: boolean = false;
 
   private setupHealthCheck(): void {
     this.httpsServer.on("request", (req, res) => {
@@ -110,6 +136,8 @@ export class QuasiPeerServer {
       },
       transports: ["websocket"],
       allowEIO3: true,
+      pingTimeout: 60000,
+      pingInterval: 25000,
     });
 
     this.redis = new Redis(config.redisUrl);
@@ -121,6 +149,10 @@ export class QuasiPeerServer {
     this.setupAIPipelines();
     this.setupSocketHandlers();
     this.startMetricsCollection();
+
+    // Initialize transcription namespace
+    this.transcriptionNamespace = this.io.of("/transcription");
+    this.initializeTranscriptionNamespace();
   }
 
   private setupPrometheusMetrics(): void {
@@ -231,88 +263,63 @@ export class QuasiPeerServer {
 
   private async setupAIPipelines(): Promise<void> {
     try {
-      // Dynamic imports for ES modules
-      const transformers = await import("@xenova/transformers");
-      const { pipeline, env } = transformers;
-
-      // Enable caching
-      env.cacheDir = "./models-cache";
-      env.localModelPath = "./models-cache";
-
-      // Progress callback for model downloads
-      const progressCallback = (progress: {
-        status: string;
-        progress?: number;
-        file?: string;
-      }) => {
-        switch (progress.status) {
-          case "downloading":
-            console.log(
-              `Downloading: ${progress.file} (${Math.round(
-                progress.progress! * 100
-              )}%)`
-            );
-            break;
-          case "loading":
-            console.log(
-              `Loading model: ${Math.round(progress.progress! * 100)}%`
-            );
-            break;
-          case "ready":
-            console.log("Model is ready");
-            break;
-          // default:
-          //   console.log(`Status: ${progress.status}`);
-        }
-      };
-
-      // Initialize Whisper model for speech recognition
-      console.log("Loading Whisper model for speech recognition...");
-      this.speechRecognitionPipeline = await pipeline(
-        "automatic-speech-recognition",
-        "Xenova/whisper-small",
-        {
-          quantized: true,
-          progress_callback: progressCallback,
-        }
-      );
-
-      // Initialize a single mBART model for all language pairs
-      console.log("Loading mBART model for translation...");
-      try {
-        const translationPipeline = await pipeline(
-          "translation",
-          "Xenova/mbart-large-50-many-to-many-mmt",
-          {
-            quantized: true,
-            progress_callback: progressCallback,
-          }
-        );
-        // Store the same pipeline instance for all language pairs
-        for (const langPair of Object.keys(this.supportedTranslations)) {
-          this.translationPipelines.set(langPair, translationPipeline);
-        }
-        console.log("Successfully loaded mBART translation model");
-      } catch (error) {
-        console.error("Failed to load translation model:", error);
-      }
-
-      // Initialize summarization model
-      console.log("Loading DistilBART model for summarization...");
-      this.summaryPipeline = await pipeline(
-        "summarization",
-        "Xenova/distilbart-cnn-6-6",
-        {
-          quantized: true,
-          progress_callback: progressCallback,
-        }
-      );
-
-      console.log("AI pipelines initialized successfully");
+      await this.setupAIWebSocket();
+      console.log("AI service WebSocket initialized");
     } catch (error) {
-      console.error("Error initializing AI pipelines:", error);
+      console.error("Error initializing AI service:", error);
       throw error;
     }
+  }
+
+  private async setupAIWebSocket(): Promise<void> {
+    if (this.aiWebSocket) {
+      this.aiWebSocket.removeAllListeners();
+      this.aiWebSocket.terminate();
+      this.aiWebSocket = null;
+    }
+
+    return new Promise((resolve, reject) => {
+      this.aiWebSocket = new WebSocket("ws://localhost:5000/ws/transcribe");
+
+      const connectionTimeout = setTimeout(() => {
+        reject(new Error("WebSocket connection timeout"));
+      }, 5000);
+
+      this.aiWebSocket.on("open", () => {
+        console.log("[Server] Connected to AI service via WebSocket");
+        clearTimeout(connectionTimeout);
+        if (this.wsReconnectInterval) {
+          clearInterval(this.wsReconnectInterval);
+          this.wsReconnectInterval = null;
+        }
+        resolve();
+      });
+
+      this.aiWebSocket.on("message", (data: WebSocket.Data) => {
+        try {
+          const result = JSON.parse(data.toString());
+          this.handleTranscriptionResult(result);
+        } catch (error) {
+          console.error("[Server] Error parsing WebSocket message:", error);
+        }
+      });
+
+      this.aiWebSocket.on("error", (error) => {
+        console.error("[Server] WebSocket error:", error);
+        reject(error);
+      });
+
+      this.aiWebSocket.on("close", () => {
+        console.log(
+          "[Server] WebSocket connection closed, attempting to reconnect..."
+        );
+        if (!this.wsReconnectInterval) {
+          this.wsReconnectInterval = setInterval(() => {
+            this.setupAIWebSocket().catch(console.error);
+          }, 5000);
+        }
+      });
+    });
   }
 
   private initializeMetrics(): ServerMetrics {
@@ -541,6 +548,13 @@ export class QuasiPeerServer {
       this.metrics.activeTranscriptions++;
       this.activeTranscriptionsGauge.inc();
 
+      // Add near audio data reception
+      console.log(
+        "[DEBUG][Server] Received audio data chunk, size:",
+        audioData.length
+      );
+      console.log("[DEBUG][Server] Processing audio through pipeline");
+
       const result = await this.processTranscription(audioData);
       result.participantId = socket.id;
 
@@ -591,24 +605,10 @@ export class QuasiPeerServer {
     audioData: Buffer
   ): Promise<TranscriptionResult> {
     try {
-      // Convert audio buffer to Float32Array
-      const audioFloat32 = new Float32Array(audioData.buffer);
-
-      // Process audio through Whisper model
-      const result = await this.speechRecognitionPipeline(audioFloat32, {
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        language: "en",
-        return_timestamps: true,
+      const response = await this.aiServiceClient.post("/transcribe", {
+        audio: audioData.toString("base64"),
       });
-
-      return {
-        text: result.text,
-        confidence: result.confidence || 0.95,
-        language: result.language || "en",
-        timestamp: Date.now(),
-        participantId: "test-participant",
-      };
+      return response.data;
     } catch (error) {
       console.error("Error in processTranscription:", error);
       throw error;
@@ -620,39 +620,18 @@ export class QuasiPeerServer {
     targetLanguage: string;
   }): Promise<TranslationResult> {
     try {
-      const sourceLanguage = "en"; // Default source language
-      const targetLanguage = data.targetLanguage;
-
-      // Get the mBART language codes
-      const sourceMbartCode =
-        this.mbartLanguageCodes[sourceLanguage] || sourceLanguage;
-      const targetMbartCode =
-        this.mbartLanguageCodes[targetLanguage] || targetLanguage;
-
-      // Get the translation pipeline
-      const langPair = `${sourceLanguage}-${targetLanguage}`;
-      let translationPipeline = this.translationPipelines.get(langPair);
-
-      if (!translationPipeline) {
-        if (!this.translationPipelines.has(langPair)) {
-          throw new Error(`Unsupported language pair: ${langPair}`);
-        }
-      }
-
-      // Perform the translation with proper language codes
-      const result = await translationPipeline(data.text, {
-        src_lang: sourceMbartCode,
-        tgt_lang: targetMbartCode,
-        max_length: 400,
+      const response = await this.aiServiceClient.post("/translate", {
+        text: data.text,
+        target_lang: data.targetLanguage,
       });
 
       return {
         text: data.text,
-        translatedText: result[0].translation_text,
-        confidence: result[0].score || 0.95,
-        language: sourceLanguage,
-        originalLanguage: sourceLanguage,
-        targetLanguage: targetLanguage,
+        translatedText: response.data.translated_text,
+        confidence: response.data.confidence,
+        language: "en",
+        originalLanguage: "en",
+        targetLanguage: data.targetLanguage,
         timestamp: Date.now(),
         participantId: "test-participant",
       };
@@ -690,7 +669,6 @@ export class QuasiPeerServer {
     meetingId: string
   ): Promise<MeetingSummary> {
     try {
-      // Get all transcriptions for the meeting
       const transcriptions = await this.redis.lrange(
         `meeting:${meetingId}:transcriptions`,
         0,
@@ -701,15 +679,12 @@ export class QuasiPeerServer {
         throw new Error("No transcriptions found for meeting");
       }
 
-      // Combine all transcriptions into one text
       const parsedTranscriptions = transcriptions.map((t) => JSON.parse(t));
       const fullText = parsedTranscriptions.map((t) => t.text).join(" ");
       const firstTranscriptionTime = parsedTranscriptions[0].timestamp;
 
-      // Generate summary using the AI model
-      const summary = await this.summaryPipeline(fullText, {
-        max_length: 130,
-        min_length: 30,
+      const response = await this.aiServiceClient.post("/summarize", {
+        text: fullText,
       });
 
       const meetingSummary: MeetingSummary = {
@@ -718,15 +693,14 @@ export class QuasiPeerServer {
         participants: Array.from(
           new Set(parsedTranscriptions.map((t) => t.participantId))
         ),
-        topics: [], // Extract topics using NLP if needed
-        keyPoints: [summary[0].summary_text],
-        actionItems: [], // Extract action items using NLP if needed
+        topics: [],
+        keyPoints: [response.data.summary],
+        actionItems: [],
       };
 
-      // Store the summary in Redis
       await this.redis.setex(
         `meeting:${meetingId}:summary`,
-        86400, // 24 hours TTL
+        86400,
         JSON.stringify(meetingSummary)
       );
 
@@ -797,6 +771,22 @@ export class QuasiPeerServer {
 
   public async stop(): Promise<void> {
     try {
+      // Clean up WebSocket connection
+      if (this.aiWebSocket) {
+        this.aiWebSocket.removeAllListeners();
+        this.aiWebSocket.terminate();
+        this.aiWebSocket = null;
+      }
+
+      // Clear reconnection interval
+      if (this.wsReconnectInterval) {
+        clearInterval(this.wsReconnectInterval);
+        this.wsReconnectInterval = null;
+      }
+
+      // Clear all pending requests
+      this.pendingTranscriptionRequests.clear();
+
       // Clear metrics collection interval
       if (this.metricsInterval) {
         clearInterval(this.metricsInterval);
@@ -825,6 +815,248 @@ export class QuasiPeerServer {
     } catch (error) {
       console.error("Error stopping server:", error);
       throw error;
+    }
+  }
+
+  private initializeTranscriptionNamespace() {
+    this.transcriptionNamespace.on("connection", (socket: Socket) => {
+      console.log("[Server] New transcription connection:", socket.id);
+
+      socket.on(
+        "audio-data",
+        async (data: {
+          meetingId: string;
+          userId: string;
+          userName: string;
+          audioData: number[];
+          timestamp: number;
+          language: string;
+        }) => {
+          // Only process audio if microphone is active
+          if (!this.isMicrophoneActive) {
+            return;
+          }
+
+          try {
+            console.log(
+              `[Server] Received audio data from ${data.userName} in meeting ${data.meetingId}`
+            );
+
+            const audioFloat32 = new Float32Array(data.audioData);
+            const transcription = await this.processAudioForTranscription(
+              audioFloat32,
+              data.language
+            );
+
+            if (transcription && transcription.trim()) {
+              const date = new Date(data.timestamp);
+              const formattedTime = date.toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: true,
+              });
+
+              this.transcriptionNamespace
+                .to(data.meetingId)
+                .emit("transcription-result", {
+                  userId: data.userId,
+                  userName: data.userName,
+                  text: transcription.trim(),
+                  timestamp: formattedTime,
+                  rawTimestamp: data.timestamp,
+                });
+            }
+          } catch (error) {
+            // Only log error if microphone is still active
+            if (this.isMicrophoneActive) {
+              console.error("[Server] Error processing audio data:", error);
+              socket.emit("error", {
+                message: "Failed to process audio data",
+                details: (error as Error).message,
+              });
+            }
+          }
+        }
+      );
+
+      // Add handlers for microphone state
+      socket.on("microphone-state", (isEnabled: boolean) => {
+        this.isMicrophoneActive = isEnabled;
+        if (!isEnabled) {
+          this.cleanupTranscriptionRequests();
+        }
+      });
+
+      socket.on("join-transcription-room", (meetingId: string) => {
+        socket.join(meetingId);
+        console.log(
+          `[Server] Socket ${socket.id} joined transcription room ${meetingId}`
+        );
+      });
+
+      socket.on("disconnect", () => {
+        console.log("[Server] Transcription connection closed:", socket.id);
+        this.cleanupTranscriptionRequests();
+      });
+    });
+  }
+
+  // Add new method to cleanup pending requests
+  private cleanupTranscriptionRequests(): void {
+    console.log("[Server] Cleaning up pending transcription requests");
+    // Clear all pending requests
+    this.pendingTranscriptionRequests.forEach((resolve, requestId) => {
+      resolve(""); // Resolve with empty string to prevent timeout errors
+    });
+    this.pendingTranscriptionRequests.clear();
+  }
+
+  private async processAudioForTranscription(
+    audioData: Float32Array,
+    language: string
+  ): Promise<string> {
+    // Don't process if microphone is disabled
+    if (!this.isMicrophoneActive) {
+      return "";
+    }
+
+    try {
+      if (!this.aiWebSocket || this.aiWebSocket.readyState !== WebSocket.OPEN) {
+        console.log(
+          "[Server] WebSocket not connected, attempting to reconnect..."
+        );
+        await this.setupAIWebSocket();
+
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error("WebSocket connection timeout"));
+          }, 5000);
+
+          const checkConnection = setInterval(() => {
+            if (this.aiWebSocket?.readyState === WebSocket.OPEN) {
+              clearInterval(checkConnection);
+              clearTimeout(timeout);
+              resolve();
+            }
+          }, 100);
+        });
+      }
+
+      return new Promise((resolve, reject) => {
+        // Don't process if microphone is disabled
+        if (!this.isMicrophoneActive) {
+          resolve("");
+          return;
+        }
+
+        const requestId = `${Date.now()}-${Math.random()
+          .toString(36)
+          .substr(2, 9)}`;
+
+        const timeoutId = setTimeout(() => {
+          if (this.pendingTranscriptionRequests.has(requestId)) {
+            this.pendingTranscriptionRequests.delete(requestId);
+            // Only reject if microphone is still active
+            if (this.isMicrophoneActive) {
+              reject(new Error("Transcription request timed out"));
+            } else {
+              resolve("");
+            }
+          }
+        }, 15000);
+
+        this.pendingTranscriptionRequests.set(requestId, (result: any) => {
+          clearTimeout(timeoutId);
+          resolve(result);
+        });
+
+        const message = {
+          requestId,
+          audioData: Array.from(audioData),
+          language,
+        };
+
+        try {
+          this.aiWebSocket!.send(JSON.stringify(message));
+        } catch (error) {
+          clearTimeout(timeoutId);
+          this.pendingTranscriptionRequests.delete(requestId);
+          reject(
+            new Error(`Failed to send audio data: ${(error as Error).message}`)
+          );
+        }
+      });
+    } catch (error) {
+      // Only log error if microphone is still active
+      if (this.isMicrophoneActive) {
+        console.error("[Server] Error in processAudioForTranscription:", error);
+      }
+      throw error;
+    }
+  }
+
+  private resampleAudio(
+    audioData: Float32Array,
+    fromSampleRate: number,
+    toSampleRate: number
+  ): Float32Array {
+    if (fromSampleRate === toSampleRate) {
+      return audioData;
+    }
+    const ratio = fromSampleRate / toSampleRate;
+    const newLength = Math.round(audioData.length / ratio);
+    const result = new Float32Array(newLength);
+
+    for (let i = 0; i < newLength; i++) {
+      const pos = i * ratio;
+      const index = Math.floor(pos);
+      const fraction = pos - index;
+
+      if (index + 1 < audioData.length) {
+        result[i] =
+          audioData[index] * (1 - fraction) + audioData[index + 1] * fraction;
+      } else {
+        result[i] = audioData[index];
+      }
+    }
+
+    return result;
+  }
+
+  private normalizeAudio(audioData: Float32Array): Float32Array {
+    // Find maximum amplitude
+    let maxAmplitude = 0;
+    for (let i = 0; i < audioData.length; i++) {
+      maxAmplitude = Math.max(maxAmplitude, Math.abs(audioData[i]));
+    }
+
+    // More aggressive normalization for quiet audio
+    if (maxAmplitude < 0.3) {
+      // Increased threshold
+      const gain = 0.7 / maxAmplitude; // Target 70% amplitude (increased from 50%)
+      const normalized = new Float32Array(audioData.length);
+      for (let i = 0; i < audioData.length; i++) {
+        normalized[i] = audioData[i] * gain;
+      }
+      return normalized;
+    }
+
+    return audioData;
+  }
+
+  // Add new method to handle transcription results
+  private handleTranscriptionResult(result: any): void {
+    const requestId = result.requestId;
+    const resolveFunction = this.pendingTranscriptionRequests.get(requestId);
+
+    if (resolveFunction) {
+      this.pendingTranscriptionRequests.delete(requestId);
+      if (result.error) {
+        console.error("[Server] Transcription error:", result.error);
+      } else {
+        resolveFunction(result.text || "");
+      }
     }
   }
 }
