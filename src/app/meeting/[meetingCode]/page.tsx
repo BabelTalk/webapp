@@ -401,19 +401,56 @@ export default function Meeting({
           return;
         }
 
+        // First establish WebSocket connection and wait for it
+        if (socket) {
+          // Ensure we're connected to the transcription room
+          socket.emit("join-transcription", {
+            roomId: params.meetingCode,
+            userName: user?.name || "Anonymous",
+          });
+
+          // Wait a moment for the connection to be established
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
         await startProcessing(stream);
-        // No need to check the return value - useAudioProcessing manages the state internally
         setIsTranscribing(true);
+
+        // Emit microphone state after successful connection and processing start
+        if (socket) {
+          socket.emit("microphone-state", true);
+        }
       } else {
         console.log("Stopping transcription");
+
+        // Emit microphone state before stopping
+        if (socket) {
+          socket.emit("microphone-state", false);
+
+          // Leave the transcription room
+          socket.emit("leave-transcription", {
+            roomId: params.meetingCode,
+          });
+        }
+
         stopProcessing();
         setIsTranscribing(false);
       }
     } catch (error) {
       console.error("Error toggling transcription:", error);
+      setIsTranscribing(false); // Reset state on error
+      stopProcessing(); // Ensure processing is stopped
       toast.error("Error toggling transcription");
     }
-  }, [isTranscribing, stream, startProcessing, stopProcessing]);
+  }, [
+    isTranscribing,
+    stream,
+    startProcessing,
+    stopProcessing,
+    socket,
+    params.meetingCode,
+    user?.name,
+  ]);
 
   // Move checkAndRequestPermissions here, before the useEffect that uses it
   const checkAndRequestPermissions = useCallback(async () => {
@@ -1380,6 +1417,12 @@ export default function Meeting({
                 </div>
                 <div className="flex-1 overflow-y-auto">
                   <TranscriptionPanel
+                    transcriptions={[]}
+                    onTranscriptionReceived={(callback) => {
+                      if (socket) {
+                        socket.on("transcription", callback);
+                      }
+                    }}
                     isTranscribing={isTranscribing}
                     onToggleTranscription={handleToggleTranscription}
                     onRequestTranslation={requestTranslation}
