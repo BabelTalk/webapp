@@ -68,11 +68,14 @@ export interface MediaStream {
 }
 
 export interface TranscriptionResult {
+  userId: string;
+  userName: string;
   text: string;
   confidence: number;
   language: string;
   timestamp: number;
   participantId: string;
+  rawTimestamp?: number;
 }
 
 export interface TranslationResult {
