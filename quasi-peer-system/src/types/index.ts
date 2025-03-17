@@ -10,6 +10,15 @@ export interface QuasiPeerConfig {
   security: SecurityConfig;
 }
 
+export interface TranscriptionResponse {
+  text: string;
+  confidence: number;
+  user_id: string;
+  room_id: string;
+  is_final: boolean;
+  error: string;
+}
+
 export interface MediaConfig {
   maxBitrate: number;
   minBitrate: number;
