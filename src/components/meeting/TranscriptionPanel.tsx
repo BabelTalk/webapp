@@ -24,22 +24,17 @@ export const TranscriptionPanel: React.FC<TranscriptionPanelProps> = ({
   onRequestTranslation,
   supportedLanguages,
 }) => {
-  const [localTranscriptions, setLocalTranscriptions] =
-    useState<TranscriptionResult[]>(transcriptions);
-
-  useEffect(() => {
-    if (onTranscriptionReceived) {
-      const handleNewTranscription = (transcription: TranscriptionResult) => {
-        setLocalTranscriptions((prev) => [...prev, transcription]);
-      };
-      onTranscriptionReceived(handleNewTranscription);
-    }
-  }, [onTranscriptionReceived]);
+  console.log(
+    "Rendering TranscriptionPanel with transcriptions:",
+    transcriptions
+  );
 
   return (
     <div className="h-full">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-lg font-semibold">Transcriptions</CardTitle>
+        <CardTitle className="text-lg font-semibold">
+          Transcriptions {isTranscribing ? "(Active)" : "(Off)"}
+        </CardTitle>
         <Button
           variant="ghost"
           size="icon"
@@ -52,14 +47,20 @@ export const TranscriptionPanel: React.FC<TranscriptionPanelProps> = ({
       <CardContent>
         <ScrollArea className="h-[calc(100vh-8rem)]">
           <div className="space-y-4">
-            {transcriptions?.map((transcription, index) => (
-              <div key={index} className="rounded-lg border p-3">
-                <div className="text-xs text-muted-foreground mb-1">
-                  {new Date(transcription.timestamp).toLocaleTimeString()}
-                </div>
-                <div className="text-sm">{transcription.text}</div>
+            {transcriptions.length === 0 ? (
+              <div className="text-center text-muted-foreground py-8">
+                No transcriptions yet. Turn on the microphone to start.
               </div>
-            ))}
+            ) : (
+              transcriptions.map((transcription, index) => (
+                <div
+                  key={`${transcription.timestamp}-${index}`}
+                  className="rounded-lg border p-3"
+                >
+                  <div className="text-sm">{transcription.text}</div>
+                </div>
+              ))
+            )}
           </div>
         </ScrollArea>
       </CardContent>
