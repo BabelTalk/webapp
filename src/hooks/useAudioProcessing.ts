@@ -226,14 +226,22 @@ export function useAudioProcessing({
               "[DEBUG][AudioProcessing] Sending audio data, size:",
               event.data.audioData.length
             );
-            socketRef.current.emit("audio-data", {
-              meetingId,
-              userId: socketRef.current.id,
-              userName,
-              audioData: event.data.audioData,
-              timestamp: Date.now(),
-              language: preferredLanguage,
-            });
+            const processAudioData = (audioData: Float32Array) => {
+              // Ensure values are in [-1, 1] range
+              const maxValue = Math.max(...audioData.map(Math.abs));
+              if (maxValue > 1.0) {
+                audioData = new Float32Array(
+                  audioData.map((x) => x / maxValue)
+                );
+              }
+
+              socketRef.current?.emit("audio-data", {
+                audioData: Buffer.from(audioData.buffer),
+                language: "en",
+                roomId: meetingId,
+              });
+            };
+            processAudioData(new Float32Array(event.data.audioData));
           }
         };
 
