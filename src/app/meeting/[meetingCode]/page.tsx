@@ -197,6 +197,9 @@ export default function Meeting({
   const [showNewMeetingModal, setShowNewMeetingModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
+  const [transcriptions, setTranscriptions] = useState<TranscriptionResult[]>(
+    []
+  );
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [currentLayout, setCurrentLayout] = useState<LayoutType>("speaker");
   const [settings, setSettings] = useState<SettingsState>({
@@ -276,7 +279,20 @@ export default function Meeting({
   // Handler functions
   const handleTranscriptionResult = useCallback(
     (result: TranscriptionResult) => {
-      transcriptionPanelRef.current?.addTranscription(result);
+      console.log("[DEBUG] Received transcription result:", result);
+      if (result.text?.trim()) {
+        setTranscriptions((prev) => {
+          const newTranscriptions = [
+            ...prev,
+            {
+              ...result,
+              timestamp: Date.now(),
+            },
+          ];
+          console.log("[DEBUG] Updated transcriptions:", newTranscriptions);
+          return newTranscriptions;
+        });
+      }
     },
     []
   );
@@ -392,28 +408,41 @@ export default function Meeting({
   });
 
   const handleToggleTranscription = useCallback(async () => {
-    console.log("Toggle transcription, current state:", isTranscribing);
+    console.log("[DEBUG] Toggle transcription, current state:", isTranscribing);
     try {
       if (!isTranscribing) {
-        console.log("Starting audio processing for transcription");
+        console.log("[DEBUG] Starting transcription...");
         if (!stream) {
+          console.error("No audio stream available");
           toast.error("No audio stream available");
           return;
         }
 
         // First establish WebSocket connection and wait for it
         if (socket) {
+          console.log("Emitting join-transcription event", {
+            roomId: params.meetingCode,
+            userName: user?.name || "Anonymous",
+          });
+
           // Ensure we're connected to the transcription room
           socket.emit("join-transcription", {
             roomId: params.meetingCode,
             userName: user?.name || "Anonymous",
           });
 
+          // THIS IS THE KEY PART - emit microphone state
+          socket.emit("microphone-state", true);
+          console.log("Emitted microphone-state: true");
+
           // Wait a moment for the connection to be established
           await new Promise((resolve) => setTimeout(resolve, 100));
+          // Log socket readiness
+          console.log("Socket connected:", socket.connected);
         }
 
         await startProcessing(stream);
+        console.log("[DEBUG] Processing started successfully");
         setIsTranscribing(true);
 
         // Emit microphone state after successful connection and processing start
@@ -421,8 +450,7 @@ export default function Meeting({
           socket.emit("microphone-state", true);
         }
       } else {
-        console.log("Stopping transcription");
-
+        console.log("[DEBUG] Stopping transcription...");
         // Emit microphone state before stopping
         if (socket) {
           socket.emit("microphone-state", false);
@@ -435,9 +463,10 @@ export default function Meeting({
 
         stopProcessing();
         setIsTranscribing(false);
+        console.log("[DEBUG] Transcription stopped");
       }
     } catch (error) {
-      console.error("Error toggling transcription:", error);
+      console.error("[DEBUG] Error in handleToggleTranscription:", error);
       setIsTranscribing(false); // Reset state on error
       stopProcessing(); // Ensure processing is stopped
       toast.error("Error toggling transcription");
@@ -451,6 +480,22 @@ export default function Meeting({
     params.meetingCode,
     user?.name,
   ]);
+
+  useEffect(() => {
+    if (socket) {
+      console.log("[DEBUG] Setting up transcription socket listener");
+      const handleTranscription = (data: any) => {
+        console.log("[DEBUG] Received transcription from socket:", data);
+        handleTranscriptionResult(data);
+      };
+      socket.on("transcription", handleTranscription);
+
+      return () => {
+        console.log("[DEBUG] Cleaning up transcription socket listener");
+        socket.off("transcription", handleTranscription);
+      };
+    }
+  }, [socket, handleTranscriptionResult]);
 
   // Move checkAndRequestPermissions here, before the useEffect that uses it
   const checkAndRequestPermissions = useCallback(async () => {
@@ -1100,6 +1145,8 @@ export default function Meeting({
     return null;
   }
 
+  console.log("[DEBUG] Current sidebar content:", sidebarContent);
+
   return (
     <TooltipProvider>
       <Toaster />
@@ -1417,12 +1464,7 @@ export default function Meeting({
                 </div>
                 <div className="flex-1 overflow-y-auto">
                   <TranscriptionPanel
-                    transcriptions={[]}
-                    onTranscriptionReceived={(callback) => {
-                      if (socket) {
-                        socket.on("transcription", callback);
-                      }
-                    }}
+                    transcriptions={transcriptions}
                     isTranscribing={isTranscribing}
                     onToggleTranscription={handleToggleTranscription}
                     onRequestTranslation={requestTranslation}
