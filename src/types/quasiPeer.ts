@@ -68,14 +68,16 @@ export interface MediaStream {
 }
 
 export interface TranscriptionResult {
-  userId: string;
-  userName: string;
   text: string;
   confidence: number;
-  language: string;
+  userId: string;
+  roomId?: string;
   timestamp: number;
+  isFinal: boolean;
+  error?: string;
   participantId: string;
-  rawTimestamp?: number;
+  language?: string;
+  userName?: string;
 }
 
 export interface TranslationResult {
@@ -107,4 +109,24 @@ export interface ServerMetrics {
   activeTranscriptions: number;
   activeTranslations: number;
   errorRate: number;
+}
+
+export interface TranscriptionResponse {
+  text: string;
+  confidence: number;
+  user_id: string;
+  room_id: string;
+  is_final: boolean;
+  error: string;
+}
+
+export interface TranscriptionPanelProps {
+  transcriptions: TranscriptionResult[];
+  onTranscriptionReceived?: (
+    callback: (transcription: TranscriptionResult) => void
+  ) => void;
+  isTranscribing?: boolean;
+  onToggleTranscription?: () => void;
+  onRequestTranslation?: (text: string, targetLanguage: string) => Promise<any>;
+  supportedLanguages?: string[];
 }
