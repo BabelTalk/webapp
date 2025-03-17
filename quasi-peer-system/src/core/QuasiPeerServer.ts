@@ -13,13 +13,17 @@ import type {
   TranslationResult,
   ServerMetrics,
   MeetingSummary,
+  TranscriptionResponse,
 } from "../types";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import axios from "axios";
 import WebSocket from "ws";
+import { EventEmitter } from "events";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
 
 interface PendingTranscriptionRequest {
   requestId: string;
@@ -28,7 +32,13 @@ interface PendingTranscriptionRequest {
   timeout: NodeJS.Timeout;
 }
 
-export class QuasiPeerServer {
+interface TranscriptionStream {
+  stream: any;
+  userId: string;
+  roomId: string;
+}
+
+export class QuasiPeerServer extends EventEmitter {
   private io: Server;
   private httpsServer: https.Server;
   private redis: Redis;
@@ -83,39 +93,13 @@ export class QuasiPeerServer {
     new Map();
 
   // Add a new property to track microphone state
-  private isMicrophoneActive: boolean = false;
+  private activeMicrophones: Set<string> = new Set();
 
-  private setupHealthCheck(): void {
-    this.httpsServer.on("request", (req, res) => {
-      if (req.url === "/health") {
-        const healthStatus = {
-          status: "ok",
-          timestamp: new Date().toISOString(),
-          services: {
-            redis: this.redis.status === "ready",
-            mediasoup: !!this.mediasoupWorker && !this.mediasoupWorker.closed,
-            socketio: this.io.engine.clientsCount >= 0,
-          },
-          metrics: {
-            activeParticipants: this.metrics.activeParticipants,
-            activeTranscriptions: this.metrics.activeTranscriptions,
-            activeTranslations: this.metrics.activeTranslations,
-            cpuUsage: this.metrics.cpuUsage,
-            memoryUsage: this.metrics.memoryUsage,
-          },
-        };
-
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        });
-        res.end(JSON.stringify(healthStatus, null, 2));
-        return;
-      }
-    });
-  }
+  private transcriptionClient: any;
+  private activeStreams: Map<string, TranscriptionStream> = new Map();
 
   constructor() {
+    super();
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = dirname(__filename);
 
@@ -144,15 +128,14 @@ export class QuasiPeerServer {
     this.participants = new Map();
     this.metrics = this.initializeMetrics();
     this.setupPrometheusMetrics();
-    this.setupHealthCheck();
     this.setupMediasoup();
-    this.setupAIPipelines();
-    this.setupSocketHandlers();
     this.startMetricsCollection();
 
     // Initialize transcription namespace
     this.transcriptionNamespace = this.io.of("/transcription");
     this.initializeTranscriptionNamespace();
+
+    this.setupGRPCClient();
   }
 
   private setupPrometheusMetrics(): void {
@@ -261,67 +244,6 @@ export class QuasiPeerServer {
     });
   }
 
-  private async setupAIPipelines(): Promise<void> {
-    try {
-      await this.setupAIWebSocket();
-      console.log("AI service WebSocket initialized");
-    } catch (error) {
-      console.error("Error initializing AI service:", error);
-      throw error;
-    }
-  }
-
-  private async setupAIWebSocket(): Promise<void> {
-    if (this.aiWebSocket) {
-      this.aiWebSocket.removeAllListeners();
-      this.aiWebSocket.terminate();
-      this.aiWebSocket = null;
-    }
-
-    return new Promise((resolve, reject) => {
-      this.aiWebSocket = new WebSocket("ws://localhost:5000/ws/transcribe");
-
-      const connectionTimeout = setTimeout(() => {
-        reject(new Error("WebSocket connection timeout"));
-      }, 5000);
-
-      this.aiWebSocket.on("open", () => {
-        console.log("[Server] Connected to AI service via WebSocket");
-        clearTimeout(connectionTimeout);
-        if (this.wsReconnectInterval) {
-          clearInterval(this.wsReconnectInterval);
-          this.wsReconnectInterval = null;
-        }
-        resolve();
-      });
-
-      this.aiWebSocket.on("message", (data: WebSocket.Data) => {
-        try {
-          const result = JSON.parse(data.toString());
-          this.handleTranscriptionResult(result);
-        } catch (error) {
-          console.error("[Server] Error parsing WebSocket message:", error);
-        }
-      });
-
-      this.aiWebSocket.on("error", (error) => {
-        console.error("[Server] WebSocket error:", error);
-        reject(error);
-      });
-
-      this.aiWebSocket.on("close", () => {
-        console.log(
-          "[Server] WebSocket connection closed, attempting to reconnect..."
-        );
-        if (!this.wsReconnectInterval) {
-          this.wsReconnectInterval = setInterval(() => {
-            this.setupAIWebSocket().catch(console.error);
-          }, 5000);
-        }
-      });
-    });
-  }
-
   private initializeMetrics(): ServerMetrics {
     return {
       activeParticipants: 0,
@@ -332,30 +254,6 @@ export class QuasiPeerServer {
       activeTranslations: 0,
       errorRate: 0,
     };
-  }
-
-  private setupSocketHandlers(): void {
-    this.io.on("connection", (socket) => {
-      console.log("New connection:", socket.id);
-
-      socket.on("join-meeting", this.handleJoinMeeting.bind(this, socket));
-      socket.on("leave-meeting", this.handleLeaveMeeting.bind(this, socket));
-      socket.on(
-        "connect-transport",
-        this.handleConnectTransport.bind(this, socket)
-      );
-      socket.on("produce", this.handleProduce.bind(this, socket));
-      socket.on("consume", this.handleConsume.bind(this, socket));
-      socket.on(
-        "transcription-request",
-        this.handleTranscriptionRequest.bind(this, socket)
-      );
-      socket.on(
-        "translation-request",
-        this.handleTranslationRequest.bind(this, socket)
-      );
-      socket.on("disconnect", this.handleDisconnect.bind(this, socket));
-    });
   }
 
   private async handleJoinMeeting(
@@ -819,230 +717,166 @@ export class QuasiPeerServer {
   }
 
   private initializeTranscriptionNamespace() {
-    this.transcriptionNamespace.on("connection", (socket: Socket) => {
+    const namespace = this.io.of("/transcription");
+
+    namespace.on("connection", (socket) => {
       console.log("[Server] New transcription connection:", socket.id);
+
+      socket.on("microphone-state", (enabled: boolean) => {
+        console.log(
+          "[Server] Microphone state changed for user:",
+          socket.id,
+          "enabled:",
+          enabled
+        );
+
+        if (enabled) {
+          this.activeMicrophones.add(socket.id);
+          console.log("[Server] Microphone activated for user:", socket.id);
+        } else {
+          this.activeMicrophones.delete(socket.id);
+
+          const stream = this.activeStreams.get(socket.id);
+          if (stream) {
+            console.log("[Server] Closing stream for user:", socket.id);
+            stream.stream.end();
+            this.activeStreams.delete(socket.id);
+          }
+        }
+      });
+
+      socket.on("join-room", (roomId: string) => {
+        console.log("[Server] User", socket.id, "joining room:", roomId);
+        socket.join(roomId);
+      });
+
+      socket.on("join-transcription", ({ roomId, userName }) => {
+        socket.join(roomId);
+        console.log(
+          `[Server] Socket ${socket.id} (${userName}) joined room ${roomId}`
+        );
+      });
 
       socket.on(
         "audio-data",
         async (data: {
-          meetingId: string;
-          userId: string;
-          userName: string;
-          audioData: number[];
-          timestamp: number;
+          audioData: Buffer;
           language: string;
+          roomId: string;
         }) => {
-          // Only process audio if microphone is active
-          if (!this.isMicrophoneActive) {
-            return;
-          }
+          console.log(
+            "[Server] Received audio data from user:",
+            socket.id,
+            "size:",
+            data.audioData.length
+          );
 
           try {
-            console.log(
-              `[Server] Received audio data from ${data.userName} in meeting ${data.meetingId}`
-            );
+            let stream = this.activeStreams.get(socket.id);
 
-            const audioFloat32 = new Float32Array(data.audioData);
-            const transcription = await this.processAudioForTranscription(
-              audioFloat32,
-              data.language
-            );
+            if (!stream) {
+              console.log(
+                "[Server] Creating new gRPC stream for user:",
+                socket.id
+              );
+              stream = {
+                stream: this.transcriptionClient.StreamTranscription(),
+                userId: socket.id,
+                roomId: data.roomId,
+              };
 
-            if (transcription && transcription.trim()) {
-              const date = new Date(data.timestamp);
-              const formattedTime = date.toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-                hour12: true,
-              });
+              stream.stream.on("data", (response: TranscriptionResponse) => {
+                console.log(
+                  "[Server] Received transcription result:",
+                  response
+                );
+                if (response.error) {
+                  socket.emit("transcription-error", { error: response.error });
+                  return;
+                }
 
-              this.transcriptionNamespace
-                .to(data.meetingId)
-                .emit("transcription-result", {
-                  userId: data.userId,
-                  userName: data.userName,
-                  text: transcription.trim(),
-                  timestamp: formattedTime,
-                  rawTimestamp: data.timestamp,
+                // Emit to the specific room
+                namespace.to(data.roomId).emit("transcription-result", {
+                  text: response.text,
+                  confidence: response.confidence,
+                  user_id: response.user_id,
+                  room_id: response.room_id,
+                  is_final: response.is_final,
+                  error: response.error || undefined,
+                  timestamp: Date.now(),
                 });
-            }
-          } catch (error) {
-            // Only log error if microphone is still active
-            if (this.isMicrophoneActive) {
-              console.error("[Server] Error processing audio data:", error);
-              socket.emit("error", {
-                message: "Failed to process audio data",
-                details: (error as Error).message,
               });
+
+              stream.stream.on("error", (error: Error) => {
+                console.error("[gRPC] Stream error:", error);
+                socket.emit("transcription-error", { error: error.message });
+                this.activeStreams.delete(socket.id);
+              });
+
+              stream.stream.on("end", () => {
+                this.activeStreams.delete(socket.id);
+              });
+
+              this.activeStreams.set(socket.id, stream);
             }
+
+            // Send the raw buffer directly without conversion
+            // The Python service will handle the conversion to numpy array
+            console.log("[Server] Sending audio to gRPC service");
+            stream.stream.write({
+              audio_data: data.audioData, // Send raw buffer
+              language: data.language || "en",
+              room_id: data.roomId,
+              user_id: socket.id,
+            });
+          } catch (error) {
+            console.error("[Server] Error processing audio:", error);
+            socket.emit("transcription-error", {
+              error: (error as Error).message,
+            });
           }
         }
       );
 
-      // Add handlers for microphone state
-      socket.on("microphone-state", (isEnabled: boolean) => {
-        this.isMicrophoneActive = isEnabled;
-        if (!isEnabled) {
-          this.cleanupTranscriptionRequests();
-        }
-      });
-
-      socket.on("join-transcription-room", (meetingId: string) => {
-        socket.join(meetingId);
-        console.log(
-          `[Server] Socket ${socket.id} joined transcription room ${meetingId}`
-        );
-      });
-
       socket.on("disconnect", () => {
-        console.log("[Server] Transcription connection closed:", socket.id);
-        this.cleanupTranscriptionRequests();
+        this.activeMicrophones.delete(socket.id);
+        const stream = this.activeStreams.get(socket.id);
+        if (stream) {
+          stream.stream.end();
+          this.activeStreams.delete(socket.id);
+        }
       });
     });
   }
 
-  // Add new method to cleanup pending requests
-  private cleanupTranscriptionRequests(): void {
-    console.log("[Server] Cleaning up pending transcription requests");
-    // Clear all pending requests
-    this.pendingTranscriptionRequests.forEach((resolve, requestId) => {
-      resolve(""); // Resolve with empty string to prevent timeout errors
-    });
-    this.pendingTranscriptionRequests.clear();
-  }
-
-  private async processAudioForTranscription(
-    audioData: Float32Array,
-    language: string
-  ): Promise<string> {
-    // Don't process if microphone is disabled
-    if (!this.isMicrophoneActive) {
-      return "";
-    }
-
+  private async setupGRPCClient() {
     try {
-      if (!this.aiWebSocket || this.aiWebSocket.readyState !== WebSocket.OPEN) {
-        console.log(
-          "[Server] WebSocket not connected, attempting to reconnect..."
-        );
-        await this.setupAIWebSocket();
+      const currentFilePath = fileURLToPath(import.meta.url);
+      const protoPath = join(
+        dirname(currentFilePath),
+        "../../../quasi-peer-system/proto/transcription.proto"
+      );
 
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error("WebSocket connection timeout"));
-          }, 5000);
-
-          const checkConnection = setInterval(() => {
-            if (this.aiWebSocket?.readyState === WebSocket.OPEN) {
-              clearInterval(checkConnection);
-              clearTimeout(timeout);
-              resolve();
-            }
-          }, 100);
-        });
-      }
-
-      return new Promise((resolve, reject) => {
-        // Don't process if microphone is disabled
-        if (!this.isMicrophoneActive) {
-          resolve("");
-          return;
-        }
-
-        const requestId = `${Date.now()}-${Math.random()
-          .toString(36)
-          .substr(2, 9)}`;
-
-        const timeoutId = setTimeout(() => {
-          if (this.pendingTranscriptionRequests.has(requestId)) {
-            this.pendingTranscriptionRequests.delete(requestId);
-            // Only reject if microphone is still active
-            if (this.isMicrophoneActive) {
-              reject(new Error("Transcription request timed out"));
-            } else {
-              resolve("");
-            }
-          }
-        }, 15000);
-
-        this.pendingTranscriptionRequests.set(requestId, (result: any) => {
-          clearTimeout(timeoutId);
-          resolve(result);
-        });
-
-        const message = {
-          requestId,
-          audioData: Array.from(audioData),
-          language,
-        };
-
-        try {
-          this.aiWebSocket!.send(JSON.stringify(message));
-        } catch (error) {
-          clearTimeout(timeoutId);
-          this.pendingTranscriptionRequests.delete(requestId);
-          reject(
-            new Error(`Failed to send audio data: ${(error as Error).message}`)
-          );
-        }
+      const packageDefinition = await protoLoader.load(protoPath, {
+        keepCase: true,
+        longs: String,
+        enums: String,
+        defaults: true,
+        oneofs: true,
       });
+
+      const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
+      this.transcriptionClient = new (
+        protoDescriptor.transcription as any
+      ).TranscriptionService(
+        "localhost:50051",
+        grpc.credentials.createInsecure()
+      );
+
+      console.log("gRPC client setup completed");
     } catch (error) {
-      // Only log error if microphone is still active
-      if (this.isMicrophoneActive) {
-        console.error("[Server] Error in processAudioForTranscription:", error);
-      }
-      throw error;
+      console.error("Failed to setup gRPC client:", error);
     }
-  }
-
-  private resampleAudio(
-    audioData: Float32Array,
-    fromSampleRate: number,
-    toSampleRate: number
-  ): Float32Array {
-    if (fromSampleRate === toSampleRate) {
-      return audioData;
-    }
-    const ratio = fromSampleRate / toSampleRate;
-    const newLength = Math.round(audioData.length / ratio);
-    const result = new Float32Array(newLength);
-
-    for (let i = 0; i < newLength; i++) {
-      const pos = i * ratio;
-      const index = Math.floor(pos);
-      const fraction = pos - index;
-
-      if (index + 1 < audioData.length) {
-        result[i] =
-          audioData[index] * (1 - fraction) + audioData[index + 1] * fraction;
-      } else {
-        result[i] = audioData[index];
-      }
-    }
-
-    return result;
-  }
-
-  private normalizeAudio(audioData: Float32Array): Float32Array {
-    // Find maximum amplitude
-    let maxAmplitude = 0;
-    for (let i = 0; i < audioData.length; i++) {
-      maxAmplitude = Math.max(maxAmplitude, Math.abs(audioData[i]));
-    }
-
-    // More aggressive normalization for quiet audio
-    if (maxAmplitude < 0.3) {
-      // Increased threshold
-      const gain = 0.7 / maxAmplitude; // Target 70% amplitude (increased from 50%)
-      const normalized = new Float32Array(audioData.length);
-      for (let i = 0; i < audioData.length; i++) {
-        normalized[i] = audioData[i] * gain;
-      }
-      return normalized;
-    }
-
-    return audioData;
   }
 
   // Add new method to handle transcription results
