@@ -58,6 +58,7 @@ export function useQuasiPeer({
   const streamRef = useRef<MediaStream | null>(null);
   const isConnectingRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const transcriptionSocketRef = useRef<Socket | null>(null);
 
   // Enhanced logging function
   const log = useCallback(
@@ -146,6 +147,42 @@ export function useQuasiPeer({
         socketRef.current.on("error", (error: Error) => {
           log("[SOCKET-DEBUG] Socket error:", error);
         });
+
+        // Create transcription socket connection
+        transcriptionSocketRef.current = io(`${serverUrl}/transcription`, {
+          transports: ["websocket"],
+          secure: true,
+          rejectUnauthorized: false,
+        });
+
+        transcriptionSocketRef.current.on("connect", () => {
+          log("Transcription socket connected");
+          // Join the transcription room when connected
+          transcriptionSocketRef.current?.emit("join-transcription", {
+            roomId: meetingId,
+            userName,
+          });
+        });
+
+        transcriptionSocketRef.current.on(
+          "transcription-result",
+          (data: any) => {
+            log("Received transcription result:", data);
+            if (onTranscriptionResult) {
+              onTranscriptionResult({
+                text: data.text,
+                confidence: data.confidence,
+                userId: data.user_id,
+                roomId: data.room_id,
+                isFinal: data.is_final,
+                error: data.error,
+                timestamp: Date.now(),
+                participantId: data.user_id,
+                language: "en",
+              });
+            }
+          }
+        );
 
         return new Promise<boolean>((resolve) => {
           // Set timeout for connection
@@ -380,21 +417,44 @@ export function useQuasiPeer({
     }
   };
 
+  const ensureConnection = useCallback(async () => {
+    if (!socketRef.current?.connected && streamRef.current) {
+      log("Socket disconnected - attempting to reconnect");
+      await connect(streamRef.current);
+    }
+  }, [connect]);
+
   // Media control functions
   const toggleMic = useCallback(() => {
     if (!streamRef.current) return;
 
     const audioProducer = producersRef.current.get("audio");
     if (audioProducer) {
-      audioProducer.pause();
+      const newMicState = !mediaState.isMicOn;
+
+      // Update track enabled state
       streamRef.current
         .getAudioTracks()
-        .forEach((track) => (track.enabled = !mediaState.isMicOn));
-      setMediaState((prev) => ({ ...prev, isMicOn: !prev.isMicOn }));
+        .forEach((track) => (track.enabled = newMicState));
 
-      socketRef.current?.emit("producer-pause", {
-        producerId: audioProducer.id,
-      });
+      // Update producer state
+      if (newMicState) {
+        audioProducer.resume();
+        socketRef.current?.emit("producer-resume", {
+          producerId: audioProducer.id,
+        });
+      } else {
+        audioProducer.pause();
+        socketRef.current?.emit("producer-pause", {
+          producerId: audioProducer.id,
+        });
+      }
+
+      // Emit microphone state to transcription namespace
+      transcriptionSocketRef.current?.emit("microphone-state", newMicState);
+
+      // Update media state
+      setMediaState((prev) => ({ ...prev, isMicOn: newMicState }));
     }
   }, [mediaState.isMicOn]);
 
@@ -448,6 +508,9 @@ export function useQuasiPeer({
                   language: response.language,
                   timestamp: Date.now(),
                   participantId: response.participantId || "local-user",
+                  userId: response.userId || "local-user",
+                  userName: response.userName || "local-user",
+                  isFinal: response.isFinal || false,
                 });
               } else {
                 console.error("Empty response from transcription server");
