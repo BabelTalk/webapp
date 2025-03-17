@@ -1,311 +1,164 @@
-import time
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from transformers import pipeline
-import torch
-import base64
-import numpy as np
 import logging
-import os
-from typing import Optional, List
-import uvicorn
-import sys
-import signal
+import numpy as np
+import torch
+from concurrent import futures
+import grpc
+import whisper
+from typing import Iterator
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Import generated protobuf code
+import transcription_pb2
+import transcription_pb2_grpc
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-app = FastAPI()
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Add this after the imports
-print(f"PyTorch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"GPU device: {torch.cuda.get_device_name(0)}")
 
 # Check CUDA availability
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"Using device: {device}")
-if device == "cuda":
-    logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
-
-# Initialize models with CUDA
-try:
-    logger.info("Loading Whisper model...")
-    whisper = pipeline(
-        "automatic-speech-recognition",
-        "openai/whisper-small",
-        device=device,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    )
-    logger.info("Whisper model loaded successfully")
-
-    logger.info("Loading NLLB model for translation...")
-    # Using NLLB-200 which supports 200+ languages
-    nllb = pipeline(
-        "translation",
-        "facebook/nllb-200-distilled-600M",  # Smaller, faster version
-        device=device,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        use_fast=False,
-    )
-    logger.info("NLLB model loaded successfully")
-
-    # Language code mapping for common languages
-    LANGUAGE_CODES = {
-        "english": "eng_Latn",
-        "hindi": "hin_Deva",
-        "marathi": "mar_Deva",
-        "spanish": "spa_Latn",
-        "french": "fra_Latn",
-        "german": "deu_Latn",
-        "japanese": "jpn_Jpan",
-        "korean": "kor_Hang",
-        "chinese": "zho_Hans",
-    }
-
-except Exception as e:
-    logger.error(f"Error loading models: {str(e)}")
-    raise
 
 
-class TranscriptionRequest(BaseModel):
-    audio: str
-    language: Optional[str] = "en"
-
-
-class TranslationRequest(BaseModel):
-    text: str
-    target_lang: str
-
-
-class SummarizationRequest(BaseModel):
-    text: str
-
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "device": device,
-        "cuda_available": torch.cuda.is_available(),
-        "cuda_device": (
-            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
-        ),
-    }
-
-
-@app.post("/transcribe")
-async def transcribe(request: TranscriptionRequest):
-    try:
-        # Decode base64 audio
-        audio_data = base64.b64decode(request.audio)
-        audio_array = np.frombuffer(audio_data, dtype=np.float32)
-
-        # Process with Whisper - simplified parameters for real-time
-        result = whisper(
-            audio_array,
-            chunk_length_s=30,  # Process 30 seconds at a time
-            stride_length_s=5,  # 5 second overlap between chunks
-            return_timestamps=True,
-            # Only use supported parameters
-            generate_kwargs={
-                "language": request.language if request.language else "en",
-                "task": "transcribe",
-            },
-        )
-
-        # Clean up the transcription
-        text = result["text"].strip()
-
-        # Remove any non-English characters if English is specified
-        if request.language == "en":
-            text = "".join(char for char in text if ord(char) < 128)
-
-        return {
-            "text": text,
-            "confidence": result.get("confidence", 0.95),
-            "language": result.get("language", "en"),
-            "timestamp": int(time.time() * 1000),
-        }
-    except Exception as e:
-        logger.error(f"Transcription error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/translate")
-async def translate(request: TranslationRequest):
-    try:
-        # Convert language names to NLLB codes
-        src_lang = LANGUAGE_CODES.get(request.src_lang.lower(), "eng_Latn")
-        tgt_lang = LANGUAGE_CODES.get(request.target_lang.lower(), "hin_Deva")
-
-        result = nllb(
-            request.text,
-            src_lang=src_lang,
-            tgt_lang=tgt_lang,
-            max_length=400,
-            num_beams=5,  # Better translation quality
-            do_sample=False,  # Deterministic output
-        )
-
-        return {
-            "translated_text": result[0]["translation_text"],
-            "confidence": result[0].get("score", 0.95),
-            "source_language": request.src_lang,
-            "target_language": request.target_lang,
-        }
-    except Exception as e:
-        logger.error(f"Translation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/summarize")
-async def summarize(request: SummarizationRequest):
-    try:
-        result = distilbart(request.text, max_length=130, min_length=30)
-        return {
-            "summary": result[0]["summary_text"],
-            "confidence": result[0].get("score", 0.95),
-        }
-    except Exception as e:
-        logger.error(f"Summarization error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Add WebSocket connection manager
-class ConnectionManager:
+class TranscriptionServicer(transcription_pb2_grpc.TranscriptionServiceServicer):
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.model = whisper.load_model("base")
+        self.active_streams = {}
+        # 30ms * 16000Hz = 480 samples per frame
+        self.FRAME_SIZE = 480
+        # Buffer 2 seconds of audio (16000Hz * 2 = 32000 samples)
+        self.BUFFER_SIZE = 32000
+        self.audio_buffers = {}
+        self.sample_rate = 16000  # Whisper expects 16kHz audio
 
-    async def connect(self, websocket: WebSocket):
+    def preprocess_audio(self, audio_data: np.ndarray) -> np.ndarray:
+        """Preprocess audio data for Whisper model."""
         try:
-            await websocket.accept()
-            self.active_connections.append(websocket)
-            logger.info(
-                f"New WebSocket connection. Active connections: {len(self.active_connections)}"
-            )
+            # Ensure we're working with float32
+            audio_data = audio_data.astype(np.float32)
+
+            # Normalize audio to [-1, 1] range if not already
+            if np.abs(audio_data).max() > 1.0:
+                audio_data = audio_data / 32768.0  # Normalize 16-bit audio
+
+            # Apply basic noise reduction (optional)
+            # Remove DC offset
+            audio_data = audio_data - np.mean(audio_data)
+
+            # Ensure audio doesn't contain NaN or Inf values
+            audio_data = np.nan_to_num(audio_data)
+
+            # Ensure correct shape for Whisper
+            if len(audio_data.shape) == 1:
+                # Whisper expects audio in shape (n_samples,)
+                return audio_data
+            elif len(audio_data.shape) == 2:
+                # If stereo, convert to mono by averaging channels
+                return np.mean(audio_data, axis=1)
+            else:
+                raise ValueError(f"Unexpected audio shape: {audio_data.shape}")
+
         except Exception as e:
-            logger.error(f"Error accepting WebSocket connection: {e}")
+            logger.error(f"Error in preprocessing: {str(e)}")
             raise
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            logger.info(
-                f"WebSocket disconnected. Active connections: {len(self.active_connections)}"
-            )
+    def StreamTranscription(
+        self,
+        request_iterator: Iterator[transcription_pb2.AudioRequest],
+        context: grpc.ServicerContext,
+    ) -> Iterator[transcription_pb2.TranscriptionResponse]:
+        try:
+            for request in request_iterator:
+                user_id = request.user_id
 
+                # Initialize buffer for new user
+                if user_id not in self.audio_buffers:
+                    self.audio_buffers[user_id] = np.array([], dtype=np.float32)
 
-manager = ConnectionManager()
+                try:
+                    # Convert incoming audio to numpy array
+                    audio_chunk = np.frombuffer(request.audio_data, dtype=np.float32)
 
-
-# Add WebSocket endpoint for transcription
-@app.websocket("/ws/transcribe")
-async def websocket_transcribe(websocket: WebSocket):
-    try:
-        await manager.connect(websocket)
-        logger.info("New WebSocket connection established")
-
-        while True:
-            try:
-                # Check connection state
-                if websocket.client_state.DISCONNECTED:
-                    logger.info("Client disconnected, breaking loop")
-                    break
-
-                # Receive and parse message
-                message = await websocket.receive_json()
-                request_id = message["requestId"]
-                audio_data = np.array(message["audioData"], dtype=np.float32)
-                language = message.get("language", "en")
-
-                logger.info(f"Processing audio for request {request_id}")
-
-                # Process with Whisper
-                result = whisper(
-                    audio_data,
-                    chunk_length_s=30,
-                    stride_length_s=5,
-                    return_timestamps=True,
-                    generate_kwargs={"language": language, "task": "transcribe"},
-                )
-
-                # Prepare and send response
-                if not websocket.client_state.DISCONNECTED:
-                    response = {
-                        "requestId": request_id,
-                        "text": result["text"].strip(),
-                        "confidence": result.get("confidence", 0.95),
-                        "language": result.get("language", "en"),
-                        "timestamp": int(time.time() * 1000),
-                    }
-
-                    logger.info(
-                        f"Sending transcription result for request {request_id}"
+                    # Append to buffer
+                    self.audio_buffers[user_id] = np.append(
+                        self.audio_buffers[user_id], audio_chunk
                     )
-                    await websocket.send_json(response)
 
-            except WebSocketDisconnect:
-                logger.info("WebSocket disconnected")
-                break
-            except Exception as e:
-                logger.error(f"Error processing audio: {str(e)}")
-                if not websocket.client_state.DISCONNECTED and "requestId" in locals():
-                    try:
-                        error_response = {
-                            "requestId": request_id,
-                            "error": str(e),
-                            "timestamp": int(time.time() * 1000),
-                        }
-                        await websocket.send_json(error_response)
-                    except:
-                        logger.error("Failed to send error response")
-                        break
+                    # Process when buffer is full
+                    if len(self.audio_buffers[user_id]) >= self.BUFFER_SIZE:
+                        logger.info(
+                            f"Processing audio buffer of size: {len(self.audio_buffers[user_id])}"
+                        )
 
-    except Exception as e:
-        logger.error(f"WebSocket error: {str(e)}")
-    finally:
-        logger.info("Cleaning up WebSocket connection")
-        manager.disconnect(websocket)
+                        # Preprocess audio
+                        processed_audio = self.preprocess_audio(
+                            self.audio_buffers[user_id]
+                        )
+
+                        # Clear buffer before processing to avoid duplicate processing
+                        self.audio_buffers[user_id] = np.array([], dtype=np.float32)
+
+                        try:
+                            # Process with Whisper
+                            with torch.no_grad():
+                                result = self.model.transcribe(
+                                    processed_audio,
+                                    language="en",
+                                    task="transcribe",
+                                    fp16=False,  # Disable fp16 to avoid NaN issues
+                                )
+
+                            if result["text"].strip():
+                                logger.info(f"Transcription result: {result['text']}")
+                                yield transcription_pb2.TranscriptionResponse(
+                                    text=result["text"],
+                                    confidence=float(result.get("confidence", 0.0)),
+                                    user_id=request.user_id,
+                                    room_id=request.room_id,
+                                    is_final=True,
+                                    error="",
+                                )
+                            else:
+                                logger.info("No text detected in audio")
+
+                        except Exception as e:
+                            logger.error(f"Error in Whisper processing: {str(e)}")
+                            yield transcription_pb2.TranscriptionResponse(
+                                text="",
+                                confidence=0.0,
+                                user_id=request.user_id,
+                                room_id=request.room_id,
+                                is_final=True,
+                                error=str(e),
+                            )
+
+                except Exception as e:
+                    logger.error(f"Error processing audio chunk: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Stream error: {str(e)}")
+        finally:
+            # Clean up buffer when stream ends
+            if user_id in self.audio_buffers:
+                del self.audio_buffers[user_id]
 
 
-def signal_handler(sig, frame):
-    logger.info("Shutting down gracefully...")
-    sys.exit(0)
+def serve():
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ("grpc.max_send_message_length", 83886080),
+            ("grpc.max_receive_message_length", 83886080),
+        ],
+    )
+
+    transcription_pb2_grpc.add_TranscriptionServiceServicer_to_server(
+        TranscriptionServicer(), server
+    )
+
+    server.add_insecure_port("[::]:50051")
+    server.start()
+    logger.info("Transcription server started on port 50051")
+    server.wait_for_termination()
 
 
 if __name__ == "__main__":
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    try:
-        # Run with increased timeout and WebSocket support
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=5000,
-            timeout_keep_alive=120,  # Increased timeout
-            loop="auto",
-            log_level="info",
-            ws_ping_interval=30,  # Keep WebSocket alive
-            ws_ping_timeout=60,  # WebSocket timeout
-        )
-    except Exception as e:
-        logger.error(f"Server error: {str(e)}")
-        sys.exit(1)
+    serve()
