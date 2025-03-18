@@ -496,7 +496,7 @@ const Chat: React.FC<ChatProps> = ({
                 </div>
               </div>
             </ContextMenuTrigger>
-            <ContextMenuContent>
+            <ContextMenuContent className="z-[9999]">
               <ContextMenuItem onClick={() => handleReply(msg)} disabled={!msg}>
                 <Reply className="h-4 w-4 mr-2" />
                 Reply
@@ -583,4 +583,4 @@ const Chat: React.FC<ChatProps> = ({
   );
 };
 
-export default Chat; 
+export default Chat;

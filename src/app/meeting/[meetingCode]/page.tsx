@@ -671,10 +671,8 @@ export default function Meeting({
     try {
       if (!document.fullscreenElement && containerRef.current) {
         await containerRef.current.requestFullscreen();
-        setIsFullScreen(true);
       } else if (document.fullscreenElement) {
         await document.exitFullscreen();
-        setIsFullScreen(false);
       }
     } catch (error) {
       console.error("Error toggling full screen:", error);
@@ -914,6 +912,19 @@ export default function Meeting({
     });
   };
 
+  // Add fullscreen change event listener
+  useEffect(() => {
+    const handleFullScreenChange = () => {
+      setIsFullScreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullScreenChange);
+    
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullScreenChange);
+    };
+  }, []);
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -1124,7 +1135,7 @@ export default function Meeting({
                 <PhoneOff className="mr-2 h-4 w-4" /> Leave
               </Button>
 
-              <div className="flex flex-wrap justify-center gap-2">
+              <div className="flex flex-wrap justify-center gap-2 dropdown-menu-container">
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1135,7 +1146,7 @@ export default function Meeting({
                       <Copy className="mr-2 h-4 w-4" /> Copy Link
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Copy Meeting Link</TooltipContent>
+                  <TooltipContent className="z-[99999]">Copy Meeting Link</TooltipContent>
                 </Tooltip>
 
                 <DropdownMenu>
@@ -1147,10 +1158,10 @@ export default function Meeting({
                         </Button>
                       </DropdownMenuTrigger>
                     </TooltipTrigger>
-                    <TooltipContent>More Options</TooltipContent>
+                    <TooltipContent className="z-[99999]">More Options</TooltipContent>
                   </Tooltip>
 
-                  <DropdownMenuContent align="end" className="z-[9999]">
+                  <DropdownMenuContent align="end" className="z-[99999]">
                     <DropdownMenuItem
                       onClick={() => setShowSettingsModal(true)}
                     >
@@ -1174,7 +1185,7 @@ export default function Meeting({
                       <DropdownMenuSubTrigger>
                         <Layout className="mr-2 h-4 w-4" /> Layout
                       </DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent className="z-[9999]">
+                      <DropdownMenuSubContent className="z-[99999]">
                         <DropdownMenuRadioGroup
                           value={currentLayout}
                           onValueChange={(value) =>

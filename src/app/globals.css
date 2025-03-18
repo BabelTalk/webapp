@@ -134,3 +134,28 @@
     --sidebar-ring: 217.2 91.2% 59.8%;
   }
 }
+
+.fullscreen-dropdown {
+  z-index: 9999;
+}
+
+/* Add these styles to your globals.css */
+:fullscreen .dropdown-menu-container {
+  position: relative;
+  z-index: 99999;
+}
+
+:-webkit-full-screen .dropdown-menu-container {
+  position: relative;
+  z-index: 99999;
+}
+
+:-moz-full-screen .dropdown-menu-container {
+  position: relative;
+  z-index: 99999;
+}
+
+:-ms-fullscreen .dropdown-menu-container {
+  position: relative;
+  z-index: 99999;
+}
